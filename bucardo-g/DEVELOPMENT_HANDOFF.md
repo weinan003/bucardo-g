@@ -71,7 +71,11 @@ go run .\cmd\bucardo-g `
 - 多源冲突和 ConflictRule；
 - TRUNCATE；
 - sequence；
+- fullcopy/初始全量复制；
+- replication origin、全局变更排序和冲突回溯；
 - custom code；
+- 完整 triggerkick/autokick、通知断线重连和 worker 崩溃恢复；
+- 完整 dbrun、bucardo_rate、连接占用和复制速率观测；
 - 完整 PostgreSQL 集成测试 harness（已建立 `regress/` 黑盒用例）；
 - 完整旧版 Bucardo schema 的历史过程函数和兼容对象。
 
@@ -82,8 +86,12 @@ go run .\cmd\bucardo-g `
   文件滚动；
 - 已完成：单 source、多 target、stage/track、VAC、过期 stage 恢复和 LISTEN/NOTIFY；
 - 已完成：多 source worker、复制写入 bypass 和 A/B 无冲突双向同步回归；
-- 尚未完成：ConflictRule、并发写入冲突、全局冲突排序、sequence/TRUNCATE、完整
-  服务托管和 Perl/Bucardo-G 差分测试。
+- 已推进：domain/database 接入配置/运行 topology，domain/job 接入 CLI run 和
+  syncrun 持久化；domain/table 已作为复制主链路关系对象；
+- 已推进：`Store.LoadTopology` 已接入 CLI，worker 核心现在接收
+  `domain/topology.Topology`；旧 control DTO/兼容 wrapper 仅待 regress fixture 迁移后删除。
+- 尚未完成：ConflictRule、并发写入冲突、全局冲突排序、fullcopy、sequence、
+  TRUNCATE、完整服务托管、断线/崩溃恢复、完整观测和 Perl/Bucardo-G 差分测试。
 
 许可说明：`LICENSE` 使用 BSD 2-Clause License，`NOTICE` 明确本项目是 Bucardo 的
 Go 语言重构，不代表原 Bucardo 官方发行版，并记录原 Bucardo 和第三方依赖的版权边界。
@@ -118,7 +126,11 @@ DELETE 正确写入 delta，事务 rollback 不产生 delta。
 2026-09-26 双向同步推进：YAML/Apply 已支持 `sources: [...]` 多 source 拓扑并为每个
 source 建立 goat/herdmap 映射；回归用例 `010_bidirectional_no_loop` 已通过 15432/25432，
 worker 可将 A 的变更复制到 B，并通过事务级 bypass 避免 B 的 trigger 产生回流 delta。
-当前双向链路只保证无冲突变更，ConflictRule 和并发冲突处理尚未实现。
+当前双向链路已实现 `bucardo_abort`，冲突时保留 delta 并避免部分写入；`bucardo_latest`、
+`bucardo_latest_all_tables`、来源优先级和完整并发冲突处理尚未实现。
+
+2026-09-27 回归用例 `011_conflict_abort` 已通过 15432/25432：同一主键的多 source
+delta 会在 target 写入前失败，双方 delta 保留且 track 不写入。
 
 `regress/` 已建立 PostgreSQL regress 风格的黑盒回归入口：
 
@@ -173,6 +185,7 @@ Linux amd64 交叉构建也已验证。
 
 ## 工作区状态说明
 
-本归档生成时，`bucardo-g` 目录在 Git 中仍显示为未跟踪目录，未创建 Git commit，也未修改现有 Perl Bucardo 文件。
+当前 Go 重构代码已纳入 Git，并保留在连续的 WIP/功能提交中；现有 Perl Bucardo 文件
+未被修改。工作区状态应以 `git status --short` 为准。
 
 如果要在其他机器通过 Git 继续开发，需要先将 `bucardo-g` 纳入版本控制并提交，或使用外部文件同步方式传递整个目录。

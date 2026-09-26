@@ -33,6 +33,7 @@ type Database struct {
 	Name       string
 	Type       Type
 	Connection string
+	DSN        string
 	Status     Status
 	MakeDelta  bool
 }
@@ -56,6 +57,7 @@ func New(name string, databaseType Type, connection string, status Status, makeD
 		Name:       name,
 		Type:       databaseType,
 		Connection: connection,
+		DSN:        connection,
 		Status:     status,
 		MakeDelta:  makeDelta,
 	}, nil

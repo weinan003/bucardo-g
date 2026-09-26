@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/bucardo-g/internal/control"
+	domainDatabase "github.com/bucardo-g/internal/domain/database"
 	"github.com/bucardo-g/internal/domain/table"
+	domainTopology "github.com/bucardo-g/internal/domain/topology"
 	"github.com/bucardo-g/internal/replication"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -105,14 +107,13 @@ func TestRegression002SingleSourceTarget(t *testing.T) {
 		}
 	}
 
-	topology := control.Sync{
-		Name:       "regress_single_source_target",
-		Source:     control.Database{Name: "source", DSN: sourceDSN},
-		Target:     control.Database{Name: "target", DSN: targetDSN},
-		TargetName: "db-target",
-		Tables:     []table.Table{relation},
+	topology := domainTopology.Topology{
+		Name:    "regress_single_source_target",
+		Sources: []domainDatabase.Database{{Name: "source", DSN: sourceDSN}},
+		Targets: []domainDatabase.Database{{Name: "target", DSN: targetDSN}},
+		Tables:  []table.Table{relation},
 	}
-	stats, err := replication.RunOnce(ctx, topology)
+	stats, err := replication.RunTopology(ctx, topology)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,9 +121,9 @@ func TestRegression002SingleSourceTarget(t *testing.T) {
 		t.Fatalf("unexpected first run stats: %+v", stats)
 	}
 	assertRows(t, ctx, target, qualified("public", tableName), []string{"1:updated", "2:inserted"})
-	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "db-target", 3)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target", 3)
 
-	stats, err = replication.RunOnce(ctx, topology)
+	stats, err = replication.RunTopology(ctx, topology)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,23 +165,22 @@ func TestRegression003TargetFailureRetry(t *testing.T) {
 		}
 	}
 
-	topology := control.Sync{
-		Name:       "regress_target_failure_retry",
-		Source:     control.Database{Name: "source", DSN: sourceDSN},
-		Target:     control.Database{Name: "target", DSN: targetDSN},
-		TargetName: "db-target",
-		Tables:     []table.Table{relation},
+	topology := domainTopology.Topology{
+		Name:    "regress_target_failure_retry",
+		Sources: []domainDatabase.Database{{Name: "source", DSN: sourceDSN}},
+		Targets: []domainDatabase.Database{{Name: "target", DSN: targetDSN}},
+		Tables:  []table.Table{relation},
 	}
-	if _, err := replication.RunOnce(ctx, topology); err == nil {
+	if _, err := replication.RunTopology(ctx, topology); err == nil {
 		t.Fatal("expected replication to fail while target table is absent")
 	}
-	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "db-target", 0)
-	assertTrackCount(t, ctx, source, qualified("bucardo", "stage_public_"+tableName), "db-target", 1)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target", 0)
+	assertTrackCount(t, ctx, source, qualified("bucardo", "stage_public_"+tableName), "target", 1)
 
 	if _, err := target.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := replication.RunOnce(ctx, topology)
+	stats, err := replication.RunTopology(ctx, topology)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,8 +188,8 @@ func TestRegression003TargetFailureRetry(t *testing.T) {
 		t.Fatalf("unexpected retry stats: %+v", stats)
 	}
 	assertRows(t, ctx, target, qualified("public", tableName), []string{"1:retry"})
-	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "db-target", 1)
-	assertTrackCount(t, ctx, source, qualified("bucardo", "stage_public_"+tableName), "db-target", 0)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target", 1)
+	assertTrackCount(t, ctx, source, qualified("bucardo", "stage_public_"+tableName), "target", 0)
 }
 
 func TestRegression004MetadataBootstrap(t *testing.T) {
@@ -222,14 +222,13 @@ func TestRegression004MetadataBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	topology := control.Sync{
-		Name:       "regress_metadata_bootstrap",
-		Source:     control.Database{Name: "source", DSN: sourceDSN},
-		Target:     control.Database{Name: "target", DSN: targetDSN},
-		TargetName: "db-target",
-		Tables:     []table.Table{relation},
+	topology := domainTopology.Topology{
+		Name:    "regress_metadata_bootstrap",
+		Sources: []domainDatabase.Database{{Name: "source", DSN: sourceDSN}},
+		Targets: []domainDatabase.Database{{Name: "target", DSN: targetDSN}},
+		Tables:  []table.Table{relation},
 	}
-	if _, err := replication.RunOnce(ctx, topology); err != nil {
+	if _, err := replication.RunTopology(ctx, topology); err != nil {
 		t.Fatal(err)
 	}
 	var objectCount int
@@ -249,7 +248,7 @@ func TestRegression004MetadataBootstrap(t *testing.T) {
 	if deltaCount != 1 {
 		t.Fatalf("expected trigger-created delta, got %d", deltaCount)
 	}
-	stats, err := replication.RunOnce(ctx, topology)
+	stats, err := replication.RunTopology(ctx, topology)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,45 +390,43 @@ func TestRegression007MultiTargetConfirmation(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	topology := control.Sync{
-		Name:   "regress_multi_target",
-		Source: control.Database{Name: "source", DSN: sourceDSN},
-		Target: control.Database{Name: "target-a", DSN: targetDSN},
-		Targets: []control.Database{
-			{Name: "target-a", DSN: targetDSN},
-			{Name: "target-b", DSN: "postgres://wwn@127.0.0.1:29999/postgres?sslmode=disable"},
+	topology := domainTopology.Topology{
+		Name:    "regress_multi_target",
+		Sources: []domainDatabase.Database{{Name: "source", DSN: sourceDSN}},
+		Targets: []domainDatabase.Database{
+			{Name: "target_a", DSN: targetDSN},
+			{Name: "target_b", DSN: "postgres://wwn@127.0.0.1:29999/postgres?sslmode=disable"},
 		},
-		TargetName: "dbgroup regress_multi_target_targets",
-		Tables:     []table.Table{{ID: 1, Database: "source", Schema: "public", Name: tableName, Relation: table.RelationTable, PrimaryKey: []string{"id"}}},
+		Tables: []table.Table{{ID: 1, Database: "source", Schema: "public", Name: tableName, Relation: table.RelationTable, PrimaryKey: []string{"id"}}},
 	}
 	topology.Targets = topology.Targets[:1]
-	if _, err := replication.RunOnce(ctx, topology); err != nil {
+	if _, err := replication.RunTopology(ctx, topology); err != nil {
 		t.Fatal(err)
 	}
-	topology.Targets = []control.Database{
-		{Name: "target-a", DSN: targetDSN},
-		{Name: "target-b", DSN: "postgres://wwn@127.0.0.1:29999/postgres?sslmode=disable"},
+	topology.Targets = []domainDatabase.Database{
+		{Name: "target_a", DSN: targetDSN},
+		{Name: "target_b", DSN: "postgres://wwn@127.0.0.1:29999/postgres?sslmode=disable"},
 	}
 	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'multi')"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := replication.RunOnce(ctx, topology); err == nil {
+	if _, err := replication.RunTopology(ctx, topology); err == nil {
 		t.Fatal("expected second target connection to fail")
 	}
-	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target-a", 1)
-	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target-b", 0)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target_a", 1)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target_b", 0)
 	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 1)
 
 	topology.Targets[1].DSN = targetDSN
-	stats, err := replication.RunOnce(ctx, topology)
+	stats, err := replication.RunTopology(ctx, topology)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stats != (replication.Stats{Updates: 1}) {
 		t.Fatalf("unexpected recovery stats: %+v", stats)
 	}
-	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target-a", 1)
-	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target-b", 1)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target_a", 1)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target_b", 1)
 	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 0)
 }
 
@@ -459,26 +456,25 @@ func TestRegression008StageRecoveryAndVacuum(t *testing.T) {
 	if err := replication.EnsureReplicationObjects(ctx, source, relation); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("bucardo", stageTableName)+" (txntime, target, started) VALUES (998, 'db-target', now() - interval '2 hours')"); err != nil {
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("bucardo", stageTableName)+" (txntime, target, started) VALUES (998, 'target', now() - interval '2 hours')"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("bucardo", deltaName)+" (id, txntime) VALUES (1, 999)"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("bucardo", trackTableName)+" (txntime, target) VALUES (999, 'db-target')"); err != nil {
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("bucardo", trackTableName)+" (txntime, target) VALUES (999, 'target')"); err != nil {
 		t.Fatal(err)
 	}
-	topology := control.Sync{
-		Name:       "regress_stage_recovery",
-		Source:     control.Database{Name: "source", DSN: sourceDSN},
-		Target:     control.Database{Name: "target", DSN: targetDSN},
-		TargetName: "db-target",
-		Tables:     []table.Table{relation},
+	topology := domainTopology.Topology{
+		Name:    "regress_stage_recovery",
+		Sources: []domainDatabase.Database{{Name: "source", DSN: sourceDSN}},
+		Targets: []domainDatabase.Database{{Name: "target", DSN: targetDSN}},
+		Tables:  []table.Table{relation},
 	}
-	if _, err := replication.RunOnce(ctx, topology); err != nil {
+	if _, err := replication.RunTopology(ctx, topology); err != nil {
 		t.Fatal(err)
 	}
-	assertTrackCount(t, ctx, source, qualified("bucardo", stageTableName), "db-target", 0)
+	assertTrackCount(t, ctx, source, qualified("bucardo", stageTableName), "target", 0)
 	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 0)
 }
 
@@ -537,28 +533,25 @@ func TestRegression010BidirectionalReplicationWithoutLoop(t *testing.T) {
 	relationB := relationA
 	relationB.ID = 2
 	relationB.Database = "source_b"
-	topology := control.Sync{
-		Name:   "regress_bidirectional",
-		Source: control.Database{Name: "source_a", DSN: sourceDSN},
-		Sources: []control.Database{
+	topology := domainTopology.Topology{
+		Name: "regress_bidirectional",
+		Sources: []domainDatabase.Database{
 			{Name: "source_a", DSN: sourceDSN},
 			{Name: "source_b", DSN: targetDSN},
 		},
-		Target: control.Database{Name: "target_a", DSN: sourceDSN},
-		Targets: []control.Database{
+		Targets: []domainDatabase.Database{
 			{Name: "target_a", DSN: sourceDSN},
 			{Name: "target_b", DSN: targetDSN},
 		},
-		TargetName: "dbgroup regress_bidirectional_targets",
-		Tables:     []table.Table{relationA, relationB},
+		Tables: []table.Table{relationA, relationB},
 	}
-	if _, err := replication.RunOnce(ctx, topology); err != nil {
+	if _, err := replication.RunTopology(ctx, topology); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'from-a')"); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := replication.RunOnce(ctx, topology)
+	stats, err := replication.RunTopology(ctx, topology)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -572,6 +565,123 @@ func TestRegression010BidirectionalReplicationWithoutLoop(t *testing.T) {
 	assertTrackCount(t, ctx, a, qualified("bucardo", trackTableName), "target_b", 1)
 }
 
+func TestRegression011ConflictAbort(t *testing.T) {
+	sourceDSN := os.Getenv("BUCARDO_TEST_SOURCE_DSN")
+	targetDSN := os.Getenv("BUCARDO_TEST_TARGET_DSN")
+	if sourceDSN == "" || targetDSN == "" {
+		t.Skip("BUCARDO_TEST_SOURCE_DSN and BUCARDO_TEST_TARGET_DSN are not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	a := openPool(t, ctx, sourceDSN)
+	defer a.Close()
+	b := openPool(t, ctx, targetDSN)
+	defer b.Close()
+	tableName := fmt.Sprintf("bucardo_g_conflict_%d", time.Now().UnixNano())
+	deltaName := "delta_public_" + tableName
+	trackTableName := "track_public_" + tableName
+	defer dropTables(a, b, tableName, deltaName, trackTableName)
+	for _, pool := range []*pgxpool.Pool{a, b} {
+		if _, err := pool.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relationA := table.Table{ID: 1, Database: "source_a", Schema: "public", Name: tableName, Relation: table.RelationTable, PrimaryKey: []string{"id"}}
+	relationB := relationA
+	relationB.ID = 2
+	relationB.Database = "source_b"
+	topology := domainTopology.Topology{
+		Name: "regress_conflict_abort",
+		Sources: []domainDatabase.Database{
+			{Name: "source_a", DSN: sourceDSN},
+			{Name: "source_b", DSN: targetDSN},
+		},
+		Targets: []domainDatabase.Database{
+			{Name: "target_a", DSN: sourceDSN},
+			{Name: "target_b", DSN: targetDSN},
+		},
+		ConflictStrategy: "abort",
+		Tables:           []table.Table{relationA, relationB},
+	}
+	if _, err := replication.RunTopology(ctx, topology); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'from-a')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'from-b')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replication.RunTopology(ctx, topology); err == nil || !strings.Contains(err.Error(), "source conflict") {
+		t.Fatalf("expected source conflict abort, got %v", err)
+	}
+	assertDeltaCount(t, ctx, a, qualified("bucardo", deltaName), 1)
+	assertDeltaCount(t, ctx, b, qualified("bucardo", deltaName), 1)
+	assertTrackCount(t, ctx, a, qualified("bucardo", trackTableName), "target_a", 0)
+	assertTrackCount(t, ctx, a, qualified("bucardo", trackTableName), "target_b", 0)
+}
+
+func TestRegression012ConflictLatest(t *testing.T) {
+	runConflictResolutionCase(t, "latest", nil, "from-b")
+}
+
+func TestRegression013ConflictSourcePriority(t *testing.T) {
+	runConflictResolutionCase(t, "source_priority", []string{"source_a", "source_b"}, "from-a")
+}
+
+func runConflictResolutionCase(t *testing.T, strategy string, priority []string, expected string) {
+	t.Helper()
+	sourceDSN := os.Getenv("BUCARDO_TEST_SOURCE_DSN")
+	targetDSN := os.Getenv("BUCARDO_TEST_TARGET_DSN")
+	if sourceDSN == "" || targetDSN == "" {
+		t.Skip("BUCARDO_TEST_SOURCE_DSN and BUCARDO_TEST_TARGET_DSN are not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	a := openPool(t, ctx, sourceDSN)
+	defer a.Close()
+	b := openPool(t, ctx, targetDSN)
+	defer b.Close()
+	tableName := fmt.Sprintf("bucardo_g_conflict_%s_%d", strategy, time.Now().UnixNano())
+	deltaName := "delta_public_" + tableName
+	trackTableName := "track_public_" + tableName
+	defer dropTables(a, b, tableName, deltaName, trackTableName)
+	for _, pool := range []*pgxpool.Pool{a, b} {
+		if _, err := pool.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relationA := table.Table{ID: 1, Database: "source_a", Schema: "public", Name: tableName, Relation: table.RelationTable, PrimaryKey: []string{"id"}}
+	relationB := relationA
+	relationB.ID = 2
+	relationB.Database = "source_b"
+	topology := domainTopology.Topology{
+		Name:             "regress_conflict_" + strategy,
+		Sources:          []domainDatabase.Database{{Name: "source_a", DSN: sourceDSN}, {Name: "source_b", DSN: targetDSN}},
+		Targets:          []domainDatabase.Database{{Name: "target_a", DSN: sourceDSN}, {Name: "target_b", DSN: targetDSN}},
+		ConflictStrategy: strategy,
+		SourcePriority:   priority,
+		Tables:           []table.Table{relationA, relationB},
+	}
+	if _, err := replication.RunTopology(ctx, topology); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'from-a')"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if _, err := b.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'from-b')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replication.RunTopology(ctx, topology); err != nil {
+		t.Fatal(err)
+	}
+	assertRows(t, ctx, a, qualified("public", tableName), []string{"1:" + expected})
+	assertRows(t, ctx, b, qualified("public", tableName), []string{"1:" + expected})
+	assertDeltaCount(t, ctx, a, qualified("bucardo", deltaName), 0)
+	assertDeltaCount(t, ctx, b, qualified("bucardo", deltaName), 0)
+}
+
 func writeCLIConfig(t *testing.T, sourceDSN, targetDSN, syncName, tableName string) string {
 	t.Helper()
 	file, err := os.CreateTemp("", "bucardo-g-cli-*.yaml")
@@ -580,7 +690,7 @@ func writeCLIConfig(t *testing.T, sourceDSN, targetDSN, syncName, tableName stri
 	}
 	path := file.Name()
 	defer file.Close()
-	content := fmt.Sprintf("controlDatabase:\n  dsn: %s\ndatabases:\n  - name: source\n    role: source\n    dsn: %s\n  - name: target\n    role: target\n    dsn: %s\nsyncs:\n  - name: %s\n    source: source\n    target: target\n    tables:\n      - schema: public\n        name: %s\n        primaryKey: [id]\n", sourceDSN, sourceDSN, targetDSN, syncName, tableName)
+	content := fmt.Sprintf("controlDatabase:\n  dsn: %s\ndatabases:\n  - name: source\n    role: source\n    dsn: %s\n  - name: target\n    role: target\n    dsn: %s\nsyncs:\n  - name: %s\n    source: source\n    target: target\n    conflictStrategy: abort\n    tables:\n      - schema: public\n        name: %s\n        primaryKey: [id]\n", sourceDSN, sourceDSN, targetDSN, syncName, tableName)
 	if _, err := file.WriteString(content); err != nil {
 		t.Fatal(err)
 	}

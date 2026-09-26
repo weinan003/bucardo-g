@@ -61,9 +61,9 @@ func (s *Store) ApplyConfig(ctx context.Context, cfg config.Config) error {
 			return fmt.Errorf("apply herd %q: %w", herdName, err)
 		}
 		if _, err := tx.Exec(ctx, `
-			INSERT INTO bucardo.sync (name, herd, dbs, status, deletemethod, autokick)
-			VALUES ($1, $2, $3, 'active', $4, false)
-			ON CONFLICT (name) DO UPDATE SET herd = EXCLUDED.herd, dbs = EXCLUDED.dbs, status = 'active', deletemethod = EXCLUDED.deletemethod`, syncConfig.Name, herdName, targetGroup, defaultDeleteMethod(syncConfig.DeleteMethod)); err != nil {
+			INSERT INTO bucardo.sync (name, herd, dbs, status, deletemethod, conflict, source_priority, autokick)
+			VALUES ($1, $2, $3, 'active', $4, $5, $6, false)
+			ON CONFLICT (name) DO UPDATE SET herd = EXCLUDED.herd, dbs = EXCLUDED.dbs, status = 'active', deletemethod = EXCLUDED.deletemethod, conflict = EXCLUDED.conflict, source_priority = EXCLUDED.source_priority`, syncConfig.Name, herdName, targetGroup, defaultDeleteMethod(syncConfig.DeleteMethod), syncConfig.ConflictStrategy, strings.Join(syncConfig.SourcePriority, "|")); err != nil {
 			return fmt.Errorf("apply sync %q: %w", syncConfig.Name, err)
 		}
 		for _, sourceDatabase := range syncConfig.SourceNames() {

@@ -9,6 +9,7 @@ internal/control/            控制库读取、syncrun 和 Sync 锁
 internal/replication/       PostgreSQL 单源单目标复制 worker
 internal/control/schema.go   控制库 MVP 元数据 migration
 internal/replication/metadata.go  source delta/track/trigger 部署
+internal/domain/topology/      worker runtime topology
 regress/                    面向公开行为的 PostgreSQL 黑盒回归
 ```
 
@@ -64,14 +65,23 @@ targets: [database_a, database_b]
 多 source 配置。
 
 控制库由 `internal/control.Store` 访问。`control.Open` 首先执行
-`internal/control/schema.go` 中的幂等 migration，然后 `LoadSync` 解析：
+`internal/control/schema.go` 中的幂等 migration，然后 `LoadTopology` 解析并转换：
 
 - active Sync；
 - source herd 对应的 active source database；
 - target group 中优先级最高的 active target；
 - source goat 对应的普通表、主键和关系类型。
 
-复制入口是 `replication.RunOnce`。它接收已经解析好的 `control.Sync`，并在 source
+领域模型收敛状态：
+
+- `domain/table.Table` 已作为 control、metadata、worker 的统一关系对象；
+- `domain/database.Database` 已用于配置 mapper 和运行 topology；配置策略校验留在
+   config DTO，因为原 Sync 状态模型已被移除；
+- `domain/job.Job` 已管理 run 的 Running/Good/Bad/Empty 生命周期，并由
+   `control.Store.RecordRun` 持久化；
+- `config` 只保留 YAML 输入 DTO；control 直接返回 `domain/topology.Topology`，worker
+   核心只接受 domain topology，不让 domain 包依赖 YAML 或 pgx。
+复制入口是 `replication.RunTopology`。它接收已经解析好的 domain topology，并在 source
 端调用 `internal/replication/metadata.go` 管理 delta/track/trigger。因此领域
 模型和数据库访问可以独立测试。CLI 负责连接控制库、获取锁、调用 worker、记录
 `syncrun` 并释放资源。
@@ -99,7 +109,7 @@ targets: [database_a, database_b]
 
 `Store.TryLockSync` 为 sync 名称计算稳定的 SHA-256 前缀，并使用 PostgreSQL
 `pg_try_advisory_lock(bigint, bigint)` 的两个 `int4` key。锁连接独立于连接池，锁的
-生命周期覆盖整个 `RunOnce`，连接关闭时 PostgreSQL 自动释放锁。
+生命周期覆盖整个 `RunTopology`，连接关闭时 PostgreSQL 自动释放锁。
 
 不要改成连接池上的普通查询锁：连接归还池后不能保证 session 生命周期。任何新的
 Controller 或服务入口都必须复用 `TryLockSync`。
@@ -130,7 +140,8 @@ go vet ./...
 - `008`：过期 stage 恢复和 VAC delta 清理；已在 15432/25432 验证；
 - `009`：LISTEN/NOTIFY 手工 kick；已在 15432 验证；
 - `010`：A/B 多 source 双向无回环复制；已在 15432/25432 验证；
-- `011`：取消、通知和跨平台运行时。
+- `011`：`bucardo_abort` 冲突预检查；已在 15432/25432 验证；
+- `012`：取消、通知和跨平台运行时。
 
 执行：
 

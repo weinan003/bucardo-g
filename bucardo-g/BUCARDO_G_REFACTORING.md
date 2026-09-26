@@ -133,7 +133,7 @@ flowchart TB
 |---|---|---|---|
 | `Database` | `internal/domain/database` | 端点、状态、角色、连接能力。 | 读取 `db`、`dbgroup`、`dbmap`。 |
 | `Table` | `internal/domain/table` | Goat、主键、列元数据、Herd 成员关系。 | 读取 `goat`、`herd`、`herdmap`。 |
-| `Sync` | `internal/domain/sync` | 复制策略、状态转换、拓扑解析。 | 读取 `sync` 和关联元数据。 |
+| `Sync` | `internal/config` + `internal/domain/topology` | 用户策略校验和运行拓扑。 | 读取 `sync` 和关联元数据。 |
 | `Trigger` | `internal/postgres/trigger` | 幂等安装/检查 delta、kick、truncate trigger。 | 保留 `bucardo_delta`、`bucardo_kick_*` 命名与语义。 |
 | `Delta` | `internal/replication/delta` | 读取待处理 delta、建立确认、判断可清理。 | 保留 `delta_*`、`track_*`、`stage_*` 格式。 |
 | `ConflictRule` | `internal/replication/conflict` | 多源冲突检测和获胜者选择。 | 兼容 `bucardo_latest`、`bucardo_latest_all_tables`、来源优先级、`bucardo_abort`。 |
@@ -553,7 +553,7 @@ BUCARDO_TEST_TARGET_DSN='postgres://...:25432/postgres?sslmode=disable' \
 go test ./regress -count=1 -v
 ```
 
-后续用例按 `011` 起连续编号，优先加入 ConflictRule、并发冲突、serve 取消和重连。每个用例必须
+后续用例按 `012` 起连续编号，优先加入 latest/来源优先级 ConflictRule、serve 取消和重连。每个用例必须
 断言持久化状态、DML 计数和失败结果，不能依赖
 日志文本、PID 或绝对时间戳。
 

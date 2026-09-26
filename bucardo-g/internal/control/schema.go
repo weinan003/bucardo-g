@@ -68,6 +68,8 @@ func ensureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			dbs text NOT NULL,
 			status text NOT NULL DEFAULT 'active',
 			deletemethod text NOT NULL DEFAULT 'delete',
+			conflict text NOT NULL DEFAULT 'abort',
+			source_priority text NOT NULL DEFAULT '',
 			autokick boolean NOT NULL DEFAULT false
 		)`,
 		`CREATE TABLE IF NOT EXISTS bucardo.syncrun (

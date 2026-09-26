@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 
+	domainDatabase "github.com/bucardo-g/internal/domain/database"
 	"github.com/bucardo-g/internal/domain/table"
 	"gopkg.in/yaml.v3"
 )
@@ -19,7 +20,7 @@ const template = "controlDatabase:\n" +
 	"  - name: source_b\n    role: source\n    dsn: postgres://user:password@127.0.0.1:5433/source_b?sslmode=disable\n" +
 	"  - name: target_a\n    role: target\n    dsn: postgres://user:password@127.0.0.1:5434/target_a?sslmode=disable\n" +
 	"  - name: target_b\n    role: target\n    dsn: postgres://user:password@127.0.0.1:5435/target_b?sslmode=disable\n\n" +
-	"syncs:\n  - name: bidirectional_sync\n    sources:\n      - source_a\n      - source_b\n    targets:\n      - target_a\n      - target_b\n    deleteMethod: delete\n    tables:\n      - schema: public\n        name: example_table\n        primaryKey:\n          - id\n"
+	"syncs:\n  - name: bidirectional_sync\n    sources:\n      - source_a\n      - source_b\n    targets:\n      - target_a\n      - target_b\n    deleteMethod: delete\n    conflictStrategy: latest\n    # Other supported choices: abort, source_priority\n    # sourcePriority: [source_a, source_b]\n    tables:\n      - schema: public\n        name: example_table\n        primaryKey:\n          - id\n"
 
 var namePattern = regexp.MustCompile(`^[A-Za-z]\w*$`)
 
@@ -40,19 +41,26 @@ type Database struct {
 }
 
 type Sync struct {
-	Name         string   `yaml:"name"`
-	Source       string   `yaml:"source"`
-	Sources      []string `yaml:"sources"`
-	Target       string   `yaml:"target"`
-	Targets      []string `yaml:"targets"`
-	DeleteMethod string   `yaml:"deleteMethod"`
-	Tables       []Table  `yaml:"tables"`
+	Name             string   `yaml:"name"`
+	Source           string   `yaml:"source"`
+	Sources          []string `yaml:"sources"`
+	Target           string   `yaml:"target"`
+	Targets          []string `yaml:"targets"`
+	DeleteMethod     string   `yaml:"deleteMethod"`
+	ConflictStrategy string   `yaml:"conflictStrategy"`
+	SourcePriority   []string `yaml:"sourcePriority"`
+	Tables           []Table  `yaml:"tables"`
 }
 
 type Table struct {
 	Schema     string   `yaml:"schema"`
 	Name       string   `yaml:"name"`
 	PrimaryKey []string `yaml:"primaryKey"`
+}
+
+// Domain converts the YAML database DTO into the validated domain endpoint.
+func (d Database) Domain() (domainDatabase.Database, error) {
+	return domainDatabase.New(d.Name, domainDatabase.TypePostgreSQL, d.DSN, domainDatabase.StatusActive, true)
 }
 
 func Load(path string) (Config, error) {
@@ -103,6 +111,9 @@ func (c Config) Validate() error {
 		}
 		if db.DSN == "" {
 			return fmt.Errorf("database %q dsn is required", db.Name)
+		}
+		if _, err := db.Domain(); err != nil {
+			return err
 		}
 		if seen[db.Name] {
 			return fmt.Errorf("database %q is duplicated", db.Name)
@@ -158,6 +169,24 @@ func (c Config) Validate() error {
 		if sync.DeleteMethod != "delete" && sync.DeleteMethod != "truncate" && sync.DeleteMethod != "truncate_cascade" {
 			return fmt.Errorf("sync %q has unsupported deleteMethod %q", sync.Name, sync.DeleteMethod)
 		}
+		if sync.ConflictStrategy == "" {
+			return fmt.Errorf("sync %q requires conflictStrategy", sync.Name)
+		}
+		if sync.ConflictStrategy != "abort" && sync.ConflictStrategy != "bucardo_abort" && sync.ConflictStrategy != "latest" && sync.ConflictStrategy != "source_priority" {
+			return fmt.Errorf("sync %q has unsupported conflictStrategy %q", sync.Name, sync.ConflictStrategy)
+		}
+		if sync.ConflictStrategy == "source_priority" {
+			if len(sync.SourcePriority) != len(sources) {
+				return fmt.Errorf("sync %q sourcePriority must list every source exactly once", sync.Name)
+			}
+			prioritySeen := make(map[string]bool)
+			for _, source := range sync.SourcePriority {
+				if !sourceSeen[source] || prioritySeen[source] {
+					return fmt.Errorf("sync %q sourcePriority references unknown or duplicate source %q", sync.Name, source)
+				}
+				prioritySeen[source] = true
+			}
+		}
 		if len(sync.Tables) == 0 {
 			return fmt.Errorf("sync %q requires at least one table", sync.Name)
 		}
@@ -170,9 +199,7 @@ func (c Config) Validate() error {
 	return nil
 }
 
-func (s Sync) TargetGroupName() string {
-	return s.Name + "_targets"
-}
+func (s Sync) TargetGroupName() string { return s.Name + "_targets" }
 
 func (s Sync) TargetNames() []string {
 	if len(s.Targets) > 0 {

@@ -15,10 +15,12 @@ func TestSyncSourcesAndTargets(t *testing.T) {
 			{Name: "c", Role: "target", DSN: "postgres://c"},
 		},
 		Syncs: []Sync{{
-			Name:    "ab_to_c",
-			Sources: []string{"a", "b"},
-			Targets: []string{"c"},
-			Tables:  []Table{{Schema: "public", Name: "items", PrimaryKey: []string{"id"}}},
+			Name:             "ab_to_c",
+			Sources:          []string{"a", "b"},
+			Targets:          []string{"c"},
+			ConflictStrategy: "source_priority",
+			SourcePriority:   []string{"a", "b"},
+			Tables:           []Table{{Schema: "public", Name: "items", PrimaryKey: []string{"id"}}},
 		}},
 	}
 	if err := cfg.Validate(); err != nil {
@@ -26,6 +28,9 @@ func TestSyncSourcesAndTargets(t *testing.T) {
 	}
 	if got := cfg.Syncs[0].SourceNames(); len(got) != 2 || got[0] != "a" || got[1] != "b" {
 		t.Fatalf("unexpected sources: %v", got)
+	}
+	if _, err := cfg.Databases[0].Domain(); err != nil {
+		t.Fatal(err)
 	}
 }
 

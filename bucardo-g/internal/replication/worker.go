@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
-	"github.com/bucardo-g/internal/control"
+	domainDatabase "github.com/bucardo-g/internal/domain/database"
 	"github.com/bucardo-g/internal/domain/table"
+	domainTopology "github.com/bucardo-g/internal/domain/topology"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,16 +23,17 @@ type Stats struct {
 	Deletes int64
 }
 
-func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
+// RunTopology executes replication using the domain runtime topology.
+func RunTopology(ctx context.Context, topology domainTopology.Topology) (Stats, error) {
 	logger := slog.Default()
-	logger.Debug("replication worker started", "sync", sync.Name, "tables", len(sync.Tables))
-	sources := sync.Sources
+	logger.Debug("replication worker started", "sync", topology.Name, "tables", len(topology.Tables))
+	sources := topology.Sources
 	if len(sources) == 0 {
-		sources = []control.Database{sync.Source}
+		return Stats{}, fmt.Errorf("topology has no sources")
 	}
 	sourcePools := make(map[string]*pgxpool.Pool, len(sources))
 	for _, sourceConfig := range sources {
-		pool, err := pgxpool.New(ctx, sourceConfig.DSN)
+		pool, err := pgxpool.New(ctx, databaseConnection(sourceConfig))
 		if err != nil {
 			return Stats{}, fmt.Errorf("open source database %q: %w", sourceConfig.Name, err)
 		}
@@ -45,24 +48,37 @@ func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 			pool.Close()
 		}
 	}()
-	targets := sync.Targets
+	targets := topology.Targets
 	if len(targets) == 0 {
-		targets = []control.Database{sync.Target}
+		return Stats{}, fmt.Errorf("topology has no targets")
 	}
 	targetNames := make([]string, len(targets))
 	for i, target := range targets {
-		if len(targets) == 1 {
-			targetNames[i] = sync.TargetName
-		} else {
-			targetNames[i] = target.Name
-		}
+		targetNames[i] = target.Name
 	}
 
+	for _, sourceConfig := range sources {
+		source := sourcePools[sourceConfig.Name]
+		for _, relation := range topology.Tables {
+			if relation.Relation != table.RelationTable || (relation.Database != "" && relation.Database != sourceConfig.Name) {
+				continue
+			}
+			if err := ensureReplicationObjects(ctx, source, relation); err != nil {
+				return Stats{}, fmt.Errorf("prepare replication metadata for %s.%s on %s: %w", relation.Schema, relation.Name, sourceConfig.Name, err)
+			}
+			if err := recoverStaleStages(ctx, source, relation, targetNames); err != nil {
+				return Stats{}, err
+			}
+		}
+	}
+	if err := detectSourceConflicts(ctx, sourcePools, sources, topology.Tables, topology.ConflictStrategy, topology.SourcePriority, targetNames); err != nil {
+		return Stats{}, err
+	}
 	var stats Stats
 	// Targets are processed serially so a failed later target cannot prevent an
 	// earlier target from recording its confirmation.
 	for i, targetConfig := range targets {
-		target, err := pgxpool.New(ctx, targetConfig.DSN)
+		target, err := pgxpool.New(ctx, databaseConnection(targetConfig))
 		if err != nil {
 			return Stats{}, fmt.Errorf("open target database %q: %w", targetConfig.Name, err)
 		}
@@ -72,15 +88,9 @@ func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 		}
 		for _, sourceConfig := range sources {
 			source := sourcePools[sourceConfig.Name]
-			for _, relation := range sync.Tables {
+			for _, relation := range topology.Tables {
 				if relation.Relation != table.RelationTable || (relation.Database != "" && relation.Database != sourceConfig.Name) {
 					continue
-				}
-				if err := ensureReplicationObjects(ctx, source, relation); err != nil {
-					return Stats{}, fmt.Errorf("prepare replication metadata for %s.%s on %s: %w", relation.Schema, relation.Name, sourceConfig.Name, err)
-				}
-				if err := recoverStaleStages(ctx, source, relation, targetNames); err != nil {
-					return Stats{}, err
 				}
 				tableStats, err := copyTable(ctx, source, target, targetNames[i], relation)
 				if err != nil {
@@ -90,14 +100,14 @@ func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 				stats.Inserts += tableStats.Inserts
 				stats.Updates += tableStats.Updates
 				stats.Deletes += tableStats.Deletes
-				logger.Debug("table replication completed", "sync", sync.Name, "source", sourceConfig.Name, "target", targetConfig.Name, "schema", relation.Schema, "table", relation.Name, "inserts", tableStats.Inserts, "updates", tableStats.Updates, "deletes", tableStats.Deletes)
+				logger.Debug("table replication completed", "sync", topology.Name, "source", sourceConfig.Name, "target", targetConfig.Name, "schema", relation.Schema, "table", relation.Name, "inserts", tableStats.Inserts, "updates", tableStats.Updates, "deletes", tableStats.Deletes)
 			}
 		}
 		target.Close()
 	}
 	for _, sourceConfig := range sources {
 		source := sourcePools[sourceConfig.Name]
-		for _, relation := range sync.Tables {
+		for _, relation := range topology.Tables {
 			if relation.Relation != table.RelationTable || (relation.Database != "" && relation.Database != sourceConfig.Name) {
 				continue
 			}
@@ -106,8 +116,111 @@ func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 			}
 		}
 	}
-	logger.Debug("replication worker completed", "sync", sync.Name, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
+	logger.Debug("replication worker completed", "sync", topology.Name, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
 	return stats, nil
+}
+
+func detectSourceConflicts(ctx context.Context, pools map[string]*pgxpool.Pool, sources []domainDatabase.Database, relations []table.Table, strategy string, priority []string, targets []string) error {
+	if len(sources) < 2 {
+		return nil
+	}
+	if strategy == "" {
+		strategy = "abort"
+	}
+	if strategy != "abort" && strategy != "bucardo_abort" && strategy != "latest" && strategy != "source_priority" {
+		return fmt.Errorf("conflict strategy %q is not implemented", strategy)
+	}
+	for _, relation := range relations {
+		if relation.Relation != table.RelationTable {
+			continue
+		}
+		candidates := make(map[string][]conflictCandidate)
+		for _, sourceConfig := range sources {
+			rows, err := pools[sourceConfig.Name].Query(ctx, `SELECT * FROM `+qualifiedName("bucardo", "delta_"+relation.Schema+"_"+relation.Name))
+			if err != nil {
+				return fmt.Errorf("read conflict delta for %s.%s on %s: %w", relation.Schema, relation.Name, sourceConfig.Name, err)
+			}
+			for rows.Next() {
+				values, err := rows.Values()
+				if err != nil {
+					rows.Close()
+					return fmt.Errorf("read conflict delta values: %w", err)
+				}
+				key := fmt.Sprintf("%#v", values[:len(relation.PrimaryKey)])
+				var changedAt time.Time
+				if len(values) > len(relation.PrimaryKey)+2 {
+					changedAt, _ = values[len(relation.PrimaryKey)+2].(time.Time)
+				}
+				candidates[key] = append(candidates[key], conflictCandidate{source: sourceConfig.Name, txntime: values[len(relation.PrimaryKey)], changedAt: changedAt})
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return fmt.Errorf("iterate conflict delta: %w", err)
+			}
+			rows.Close()
+		}
+		for key, values := range candidates {
+			if len(values) < 2 {
+				continue
+			}
+			winner, err := chooseConflictWinner(values, strategy, priority)
+			if err != nil {
+				return fmt.Errorf("source conflict on %s.%s primary key %s: %w", relation.Schema, relation.Name, key, err)
+			}
+			for _, candidate := range values {
+				if candidate.source == winner.source {
+					continue
+				}
+				for _, target := range targets {
+					if err := markTrack(ctx, pools[candidate.source], relation, target, candidate.txntime); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type conflictCandidate struct {
+	source    string
+	txntime   any
+	changedAt time.Time
+}
+
+func databaseConnection(value domainDatabase.Database) string {
+	if value.Connection != "" {
+		return value.Connection
+	}
+	return value.DSN
+}
+
+func chooseConflictWinner(candidates []conflictCandidate, strategy string, priority []string) (conflictCandidate, error) {
+	winner := candidates[0]
+	switch strategy {
+	case "", "abort", "bucardo_abort":
+		return conflictCandidate{}, fmt.Errorf("conflictStrategy=abort")
+	case "latest":
+		for _, candidate := range candidates[1:] {
+			if candidate.changedAt.After(winner.changedAt) || (candidate.changedAt.Equal(winner.changedAt) && candidate.source > winner.source) {
+				winner = candidate
+			}
+		}
+		return winner, nil
+	case "source_priority":
+		rank := make(map[string]int, len(priority))
+		for index, source := range priority {
+			rank[source] = index
+		}
+		for _, candidate := range candidates[1:] {
+			if rank[candidate.source] < rank[winner.source] {
+				winner = candidate
+			}
+		}
+		return winner, nil
+	default:
+		return conflictCandidate{}, fmt.Errorf("unsupported conflictStrategy=%s", strategy)
+	}
 }
 
 func copyTable(ctx context.Context, source, target *pgxpool.Pool, targetName string, relation table.Table) (Stats, error) {
@@ -264,7 +377,7 @@ func targetRowExists(ctx context.Context, tx pgx.Tx, relation table.Table, keys 
 }
 
 func markTrack(ctx context.Context, source *pgxpool.Pool, relation table.Table, target string, txntime any) error {
-	_, err := source.Exec(ctx, `INSERT INTO `+quoteIdent("bucardo")+`.`+quoteIdent(trackName(relation))+` (txntime,target) VALUES ($1,$2)`, txntime, target)
+	_, err := source.Exec(ctx, `INSERT INTO `+quoteIdent("bucardo")+`.`+quoteIdent(trackName(relation))+` (txntime,target) VALUES ($1,$2) ON CONFLICT (txntime,target) DO NOTHING`, txntime, target)
 	if err != nil {
 		return fmt.Errorf("mark track table: %w", err)
 	}

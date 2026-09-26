@@ -14,6 +14,7 @@ import (
 
 	"github.com/bucardo-g/internal/config"
 	"github.com/bucardo-g/internal/control"
+	"github.com/bucardo-g/internal/domain/job"
 	"github.com/bucardo-g/internal/logging"
 	"github.com/bucardo-g/internal/replication"
 	"github.com/spf13/cobra"
@@ -215,12 +216,12 @@ func runWithContext(ctx context.Context, controlDSN, syncName string) (runErr er
 		return err
 	}
 	defer store.Close()
-	topology, err := store.LoadSync(ctx, syncName)
+	runtimeTopology, err := store.LoadTopology(ctx, syncName)
 	if err != nil {
 		return err
 	}
-	logger.Debug("sync topology loaded", "sync", topology.Name, "source", topology.Source.Name, "target", topology.Target.Name, "tables", len(topology.Tables))
-	lock, err := store.TryLockSync(ctx, topology.Name)
+	logger.Debug("sync topology loaded", "sync", runtimeTopology.Name, "sources", len(runtimeTopology.Sources), "targets", len(runtimeTopology.Targets), "tables", len(runtimeTopology.Tables))
+	lock, err := store.TryLockSync(ctx, runtimeTopology.Name)
 	if err != nil {
 		return err
 	}
@@ -231,23 +232,33 @@ func runWithContext(ctx context.Context, controlDSN, syncName string) (runErr er
 	}()
 
 	started := time.Now()
-	stats, err := replication.RunOnce(ctx, topology)
-	status := statusForStats(stats)
-	details := fmt.Sprintf("source=%s target=%s", topology.Source.Name, topology.Target.Name)
-	if err != nil {
-		status = "bad"
-		details = err.Error()
-		logger.Error("sync run failed", "sync", topology.Name, "error", err, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
-	}
-	if recordErr := store.RecordRun(ctx, topology.Name, status, details, stats.Inserts, stats.Deletes, started); recordErr != nil && err == nil {
-		return recordErr
-	}
-	fmt.Printf("sync=%s status=%s inserts=%d updates=%d deletes=%d\n",
-		topology.Name, status, stats.Inserts, stats.Updates, stats.Deletes)
+	runJob, err := job.Start(runtimeTopology.Name, started)
 	if err != nil {
 		return err
 	}
-	logger.Info("sync run completed", "sync", topology.Name, "status", status, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
+	stats, err := replication.RunTopology(ctx, runtimeTopology)
+	status := statusForStats(stats)
+	runJob.Inserts = stats.Inserts
+	runJob.Updates = stats.Updates
+	runJob.Deletes = stats.Deletes
+	details := fmt.Sprintf("sources=%d targets=%d", len(runtimeTopology.Sources), len(runtimeTopology.Targets))
+	if err != nil {
+		status = "bad"
+		details = err.Error()
+		logger.Error("sync run failed", "sync", runtimeTopology.Name, "error", err, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
+	}
+	if finishErr := runJob.Finish(job.Status(status), time.Now(), err); finishErr != nil {
+		return finishErr
+	}
+	if recordErr := store.RecordRun(ctx, runJob, details); recordErr != nil && err == nil {
+		return recordErr
+	}
+	fmt.Printf("sync=%s status=%s inserts=%d updates=%d deletes=%d\n",
+		runtimeTopology.Name, status, stats.Inserts, stats.Updates, stats.Deletes)
+	if err != nil {
+		return err
+	}
+	logger.Info("sync run completed", "sync", runtimeTopology.Name, "status", status, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
 	return nil
 }
 

@@ -26,11 +26,8 @@ func ensureReplicationObjects(ctx context.Context, source *pgxpool.Pool, relatio
 	track := trackName(relation)
 	columns := joinQuoted(relation.PrimaryKey)
 	if _, err := source.Exec(ctx, `CREATE TABLE IF NOT EXISTS `+qualifiedName("bucardo", delta)+
-		` AS SELECT `+columns+`, NULL::bigint AS "txntime" FROM `+qualifiedName(relation.Schema, relation.Name)+` WHERE false`); err != nil {
+		` AS SELECT `+columns+`, NULL::bigint AS "txntime", NULL::timestamptz AS "changed_at" FROM `+qualifiedName(relation.Schema, relation.Name)+` WHERE false`); err != nil {
 		return fmt.Errorf("create delta table %s: %w", delta, err)
-	}
-	if _, err := source.Exec(ctx, `ALTER TABLE `+qualifiedName("bucardo", delta)+` ADD COLUMN IF NOT EXISTS "txntime" bigint`); err != nil {
-		return fmt.Errorf("add delta timestamp %s: %w", delta, err)
 	}
 	if _, err := source.Exec(ctx, `CREATE INDEX IF NOT EXISTS `+quoteIdent(delta+"_txntime_idx")+
 		` ON `+qualifiedName("bucardo", delta)+` ("txntime")`); err != nil {
@@ -66,13 +63,13 @@ BEGIN
 		RETURN NEW;
 	END IF;
 	IF TG_OP = 'DELETE' THEN
-		INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime") VALUES (` + strings.Join(oldValues, ", ") + `, txid_current());
+		INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime", "changed_at") VALUES (` + strings.Join(oldValues, ", ") + `, txid_current(), clock_timestamp());
 		RETURN OLD;
 	END IF;
 	IF TG_OP = 'UPDATE' AND (` + strings.Join(keyChanged, " OR ") + `) THEN
-		INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime") VALUES (` + strings.Join(oldValues, ", ") + `, txid_current());
+		INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime", "changed_at") VALUES (` + strings.Join(oldValues, ", ") + `, txid_current(), clock_timestamp());
 	END IF;
-	INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime") VALUES (` + strings.Join(newValues, ", ") + `, txid_current());
+	INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime", "changed_at") VALUES (` + strings.Join(newValues, ", ") + `, txid_current(), clock_timestamp());
 	RETURN NEW;
 END;
 $bucardo_g$`
