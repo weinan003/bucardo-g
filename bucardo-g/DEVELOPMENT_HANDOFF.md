@@ -32,8 +32,11 @@ github.com/bucardo-g
   - 目标端使用 `INSERT ... ON CONFLICT DO UPDATE` 或 DELETE。
   - 目标事务提交后写入源端 `track_<schema>_<table>`。
   - 目标事务失败时保留 delta，修复后可重复执行。
+  - 零变更轮次记录为 `empty`，并设置 `syncrun.lastempty`。
 - `cmd/bucardo-g/main.go`
-  - 单次执行 CLI。
+  - Cobra CLI、YAML apply、run 和全局 slog 日志参数。
+- `internal/logging/logging.go`
+  - 统一配置 JSON/text handler、日志级别和 stderr 输出。
 
 ## 当前 MVP 运行方式
 
@@ -41,8 +44,7 @@ github.com/bucardo-g
 
 ```powershell
 go run .\cmd\bucardo-g `
-  -control-dsn "postgres://user:password@localhost:5432/bucardo" `
-  -sync "example_sync"
+  run bucardo.yaml --sync "example_sync"
 ```
 
 当前命令每次执行一个 sync，读取一个 active source 和目标组中优先级最高的 active target。
@@ -86,6 +88,12 @@ DELETE、目标端 track 写入和重复轮次跳过；15432 -> 25432 及反向 
 
 2026-09-26 回归用例 `004_metadata_bootstrap` 已通过 15432 -> 25432：首次运行自动
 创建控制 schema、delta/track 表和 delta trigger，业务 INSERT 被捕获并复制成功。
+
+2026-09-26 回归用例 `005_trigger_events` 已通过 15432：自动 trigger 对 UPDATE、
+DELETE 正确写入 delta，事务 rollback 不产生 delta。
+
+2026-09-26 回归用例 `006_cli_syncrun_status` 已通过 15432 -> 25432：CLI apply/run
+完整验证 empty、good、bad 输出、退出码和 `syncrun` 标志位。
 
 `regress/` 已建立 PostgreSQL regress 风格的黑盒回归入口：
 
@@ -135,7 +143,7 @@ Linux amd64 交叉构建也已验证。
 按小步增量继续：
 
 1. 为控制库和复制 worker 增加可注入的接口，便于测试。
-2. 扩展 `regress/` fixture，覆盖 trigger 的 UPDATE/DELETE/rollback 和多目标确认。
+2. 扩展 `regress/` fixture，覆盖主键变化、多目标确认和清理。
 3. 增加 LISTEN/NOTIFY 监听器和手工 kick 调度，并将行为加入 regress 用例。
 4. 增加 TRUNCATE、sequence 和多源冲突策略及对应回归场景。
 5. 最后实现常驻服务和 Windows/Linux 服务包装。

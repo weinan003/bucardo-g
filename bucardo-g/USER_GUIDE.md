@@ -50,7 +50,14 @@ go vet ./...
 ## 4. 通过 YAML 管理配置
 
 用户不需要手工向 `bucardo.db`、`dbmap`、`goat`、`herdmap` 或 `sync` 写 SQL。创建
-配置文件 `bucardo.yaml`：
+配置文件 `bucardo.yaml`。也可以先让程序生成模板：
+
+```sh
+./bucardo-g init bucardo.yaml
+```
+
+`init` 只创建新文件，不会覆盖已有配置；然后按实际环境修改模板中的 DSN、Sync
+名称和业务表。配置文件示例：
 
 ```yaml
 controlDatabase:
@@ -68,7 +75,6 @@ syncs:
   - name: example_sync
     source: source
     target: target
-    targetGroup: example_targets
     deleteMethod: delete
     tables:
       - schema: public
@@ -79,7 +85,7 @@ syncs:
 执行：
 
 ```sh
-./bucardo-g apply -config bucardo.yaml
+./bucardo-g apply bucardo.yaml
 ```
 
 `apply` 会校验配置、检查 source/target 连通性，并事务化创建或更新控制库配置。
@@ -89,17 +95,14 @@ syncs:
 ## 5. 运行一次 Sync
 
 ```sh
-./bucardo-g \
-  -control-dsn 'postgres://user:password@127.0.0.1:5432/bucardo?sslmode=disable' \
-  -sync 'example_sync'
+./bucardo-g run bucardo.yaml --sync example_sync
 ```
 
 PowerShell：
 
 ```powershell
 .\bucardo-g.exe `
-  -control-dsn 'postgres://user:password@127.0.0.1:5432/bucardo?sslmode=disable' `
-  -sync 'example_sync'
+  run bucardo.yaml --sync example_sync
 ```
 
 `example_sync` 必须是控制库中状态为 `active` 的 Sync。程序会读取该 Sync 的 active
@@ -181,3 +184,18 @@ source 和目标组中优先级最高的 active target。
 常驻服务、LISTEN/NOTIFY、自动 kick、多源冲突、TRUNCATE、sequence、VAC、custom
 code、完整旧版 schema 兼容和完整 Perl/Bucardo-G 差分迁移仍在后续开发计划中。生产迁移
 前应先使用 `regress/` 和现有 Perl TAP 测试验证同一 fixture 的结果。
+
+## 10. 日志
+
+Bucardo-G 使用 Go 标准库 `log/slog` 输出结构化日志，默认写到 stderr，默认格式为
+JSON、级别为 `info`：
+
+```bash
+./bucardo-g run bucardo.yaml --sync example_sync \
+  --log-level debug \
+  --log-format text
+```
+
+支持的级别为 `debug`、`info`、`warn`、`error`；支持的格式为 `json` 和 `text`。
+日志会记录命令生命周期、schema/apply、Sync 锁、每张表的 delta 数量、DML 统计和
+失败原因。日志不会记录 DSN、密码或业务行内容。

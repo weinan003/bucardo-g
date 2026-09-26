@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/bucardo-g/internal/domain/table"
@@ -12,6 +13,7 @@ import (
 )
 
 func ensureReplicationObjects(ctx context.Context, source *pgxpool.Pool, relation table.Table) error {
+	logger := slog.Default()
 	if relation.Relation != table.RelationTable || len(relation.PrimaryKey) == 0 {
 		return nil
 	}
@@ -41,9 +43,11 @@ func ensureReplicationObjects(ctx context.Context, source *pgxpool.Pool, relatio
 	functionName := deltaFunctionName(relation)
 	newValues := make([]string, len(relation.PrimaryKey))
 	oldValues := make([]string, len(relation.PrimaryKey))
+	keyChanged := make([]string, len(relation.PrimaryKey))
 	for i, key := range relation.PrimaryKey {
 		newValues[i] = "NEW." + quoteIdent(key)
 		oldValues[i] = "OLD." + quoteIdent(key)
+		keyChanged[i] = "OLD." + quoteIdent(key) + " IS DISTINCT FROM NEW." + quoteIdent(key)
 	}
 	functionSQL := `CREATE OR REPLACE FUNCTION ` + qualifiedName("bucardo", functionName) + `()
 RETURNS trigger LANGUAGE plpgsql AS $bucardo_g$
@@ -51,6 +55,9 @@ BEGIN
 	IF TG_OP = 'DELETE' THEN
 		INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime") VALUES (` + strings.Join(oldValues, ", ") + `, txid_current());
 		RETURN OLD;
+	END IF;
+	IF TG_OP = 'UPDATE' AND (` + strings.Join(keyChanged, " OR ") + `) THEN
+		INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime") VALUES (` + strings.Join(oldValues, ", ") + `, txid_current());
 	END IF;
 	INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime") VALUES (` + strings.Join(newValues, ", ") + `, txid_current());
 	RETURN NEW;
@@ -65,7 +72,13 @@ FOR EACH ROW EXECUTE FUNCTION ` + qualifiedName("bucardo", functionName) + `()`
 	if _, err := source.Exec(ctx, triggerSQL); err != nil {
 		return fmt.Errorf("create delta trigger on %s.%s: %w", relation.Schema, relation.Name, err)
 	}
+	logger.Debug("replication metadata ready", "schema", relation.Schema, "table", relation.Name, "delta_table", delta, "track_table", track)
 	return nil
+}
+
+// EnsureReplicationObjects installs the delta/track metadata for one source table.
+func EnsureReplicationObjects(ctx context.Context, source *pgxpool.Pool, relation table.Table) error {
+	return ensureReplicationObjects(ctx, source, relation)
 }
 
 func deltaFunctionName(relation table.Table) string {

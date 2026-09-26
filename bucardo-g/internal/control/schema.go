@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -12,6 +13,7 @@ const controlSchemaVersion = 1
 // ensureSchema installs the control metadata required by the current Go MVP.
 // Each migration is idempotent and recorded for future upgrades.
 func ensureSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	logger := slog.Default()
 	statements := []string{
 		`CREATE SCHEMA IF NOT EXISTS bucardo`,
 		`CREATE TABLE IF NOT EXISTS bucardo.bucardo_g_schema_version (
@@ -105,5 +107,6 @@ func ensureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, `INSERT INTO bucardo.bucardo_g_schema_version(version) VALUES ($1) ON CONFLICT (version) DO NOTHING`, controlSchemaVersion); err != nil {
 		return fmt.Errorf("record control schema version: %w", err)
 	}
+	logger.Debug("control schema migration ready", "version", controlSchemaVersion)
 	return nil
 }

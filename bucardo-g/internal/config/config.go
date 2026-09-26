@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"regexp"
@@ -8,6 +9,29 @@ import (
 	"github.com/bucardo-g/internal/domain/table"
 	"gopkg.in/yaml.v3"
 )
+
+const template = `controlDatabase:
+  dsn: postgres://user:password@127.0.0.1:5432/bucardo?sslmode=disable
+
+databases:
+  - name: source
+    role: source
+    dsn: postgres://user:password@127.0.0.1:5432/source?sslmode=disable
+  - name: target
+    role: target
+    dsn: postgres://user:password@127.0.0.1:5433/target?sslmode=disable
+
+syncs:
+  - name: example_sync
+    source: source
+    target: target
+    deleteMethod: delete
+    tables:
+      - schema: public
+        name: example_table
+        primaryKey:
+          - id
+`
 
 var namePattern = regexp.MustCompile(`^[A-Za-z]\w*$`)
 
@@ -31,7 +55,6 @@ type Sync struct {
 	Name         string  `yaml:"name"`
 	Source       string  `yaml:"source"`
 	Target       string  `yaml:"target"`
-	TargetGroup  string  `yaml:"targetGroup"`
 	DeleteMethod string  `yaml:"deleteMethod"`
 	Tables       []Table `yaml:"tables"`
 }
@@ -48,13 +71,27 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse YAML config %q: %w", path, err)
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func WriteTemplate(path string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create config template %q: %w", path, err)
+	}
+	defer file.Close()
+	if _, err := file.WriteString(template); err != nil {
+		return fmt.Errorf("write config template %q: %w", path, err)
+	}
+	return nil
 }
 
 func (c Config) Validate() error {
@@ -90,9 +127,6 @@ func (c Config) Validate() error {
 		if sync.Source == sync.Target {
 			return fmt.Errorf("sync %q source and target must differ", sync.Name)
 		}
-		if sync.TargetGroup != "" && !namePattern.MatchString(sync.TargetGroup) {
-			return fmt.Errorf("sync %q targetGroup is invalid", sync.Name)
-		}
 		if sync.DeleteMethod == "" {
 			sync.DeleteMethod = "delete"
 		}
@@ -112,9 +146,6 @@ func (c Config) Validate() error {
 }
 
 func (s Sync) TargetGroupName() string {
-	if s.TargetGroup != "" {
-		return s.TargetGroup
-	}
 	return s.Name + "_targets"
 }
 

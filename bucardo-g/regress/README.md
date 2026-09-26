@@ -38,6 +38,10 @@ Regression cases use stable numeric names, similar to PostgreSQL's `sql/` and
   later retry converges.
 - `004_metadata_bootstrap`: control/source metadata, delta/track tables and
   delta trigger are created automatically before the first copy.
+- `005_trigger_events`: UPDATE, DELETE, primary-key-change support and rollback
+  behavior for automatically managed delta triggers.
+- `006_cli_syncrun_status`: CLI apply/run plus persisted empty, good, and bad
+  syncrun states.
 
 Each case should assert durable database state and counters, not log wording or
 unstable timestamps. New behavior belongs here once it crosses a package
@@ -45,8 +49,5 @@ boundary; package tests should cover only local helpers and validation rules.
 
 ## Planned cases
 
-- `005_delta_capture`: trigger-created delta rows for INSERT, UPDATE, DELETE,
-  rollback, duplicate changes, and primary-key changes.
-- `005_multi_target_confirmation`: cleanup waits until every target is tracked.
-- `006_cli_run_once`: control-store loading, syncrun status, and lock errors.
-- `007_cross_platform_runtime`: cancellation and graceful shutdown behavior.
+- `007_multi_target_confirmation`: cleanup waits until every target is tracked.
+- `008_cross_platform_runtime`: cancellation and graceful shutdown behavior.

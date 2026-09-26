@@ -15,9 +15,16 @@ regress/                    面向公开行为的 PostgreSQL 黑盒回归
 模块路径为 `github.com/bucardo-g`。当前实现使用 `pgx/v5` 和 `pgxpool`，不引入
 Perl DBI，也不依赖 Unix 专有进程 API。
 
+日志统一使用 `log/slog`。CLI 根命令通过 `--log-level` 和 `--log-format` 配置全局
+handler，默认 JSON/info 输出到 stderr。控制层和复制层使用结构化字段记录 sync、
+数据库逻辑名、schema/table、批次计数和错误；禁止把 DSN、密码或业务行写入日志。
+
 ## 2. 运行边界
 
-配置入口是 `bucardo-g apply -config bucardo.yaml`。`internal/config` 解析 YAML，
+配置入口是 `bucardo-g apply bucardo.yaml`；运行 Sync 使用
+`bucardo-g run bucardo.yaml --sync example_sync`；使用
+`bucardo-g init bucardo.yaml` 可以生成不可覆盖的初始模板。
+`internal/config` 解析 YAML，
 `control.ApplyConfig` 在事务中 upsert `db`、`dbmap`、`goat`、`herdmap` 和 `sync`；
 apply 前会 ping 每个 source/target。配置文件描述用户意图，控制表属于程序生成的
 持久化投影，不应要求用户直接写 SQL。
@@ -83,9 +90,10 @@ go vet ./...
 - `002`：单源单目标 DML、track 去重、空轮次；
 - `003`：目标失败不写 track，修复后重试收敛；已在 15432/25432 验证；
 - `004`：自动部署元表、trigger delta 捕获和 rollback；已在 15432/25432 验证；
-- `005`：多目标确认和清理；
-- `006`：CLI、syncrun 和错误结果；
-- `007`：取消、通知和跨平台运行时。
+- `005`：UPDATE、DELETE、主键变化和 rollback 的 trigger delta；已在 15432 验证；
+- `006`：CLI、syncrun 的 empty/good/bad 和错误结果；已在 15432/25432 验证；
+- `007`：多目标确认和清理；
+- `008`：取消、通知和跨平台运行时。
 
 执行：
 

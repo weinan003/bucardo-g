@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -252,6 +254,171 @@ func TestRegression004MetadataBootstrap(t *testing.T) {
 		t.Fatalf("unexpected bootstrap replication stats: %+v", stats)
 	}
 	assertRows(t, ctx, target, qualified("public", tableName), []string{"1:triggered"})
+}
+
+func TestRegression005TriggerUpdateDeleteRollback(t *testing.T) {
+	sourceDSN := os.Getenv("BUCARDO_TEST_SOURCE_DSN")
+	if sourceDSN == "" {
+		t.Skip("BUCARDO_TEST_SOURCE_DSN is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	source := openPool(t, ctx, sourceDSN)
+	defer source.Close()
+	tableName := fmt.Sprintf("bucardo_g_trigger_%d", time.Now().UnixNano())
+	deltaName := "delta_public_" + tableName
+	trackTableName := "track_public_" + tableName
+	relation := table.Table{Schema: "public", Name: tableName, Relation: table.RelationTable, PrimaryKey: []string{"id"}}
+	defer dropTables(source, source, tableName, deltaName, trackTableName)
+	if _, err := source.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := replication.EnsureReplicationObjects(ctx, source, relation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'before')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Exec(ctx, "TRUNCATE "+qualified("bucardo", deltaName)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Exec(ctx, "UPDATE "+qualified("public", tableName)+" SET value = 'after' WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 1)
+	if _, err := source.Exec(ctx, "UPDATE "+qualified("public", tableName)+" SET id = 2 WHERE id = 1"); err != nil {
+		t.Fatal(err)
+	}
+	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 3)
+	if _, err := source.Exec(ctx, "DELETE FROM "+qualified("public", tableName)+" WHERE id = 2"); err != nil {
+		t.Fatal(err)
+	}
+	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 4)
+	if _, err := source.Exec(ctx, "TRUNCATE "+qualified("bucardo", deltaName)); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := source.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (2, 'rolled back')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 0)
+}
+
+func TestRegression006CLIAndSyncrunStatuses(t *testing.T) {
+	sourceDSN := os.Getenv("BUCARDO_TEST_SOURCE_DSN")
+	targetDSN := os.Getenv("BUCARDO_TEST_TARGET_DSN")
+	if sourceDSN == "" || targetDSN == "" {
+		t.Skip("BUCARDO_TEST_SOURCE_DSN and BUCARDO_TEST_TARGET_DSN are not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	source := openPool(t, ctx, sourceDSN)
+	defer source.Close()
+	target := openPool(t, ctx, targetDSN)
+	defer target.Close()
+
+	tableName := fmt.Sprintf("bucardo_g_cli_%d", time.Now().UnixNano())
+	syncName := fmt.Sprintf("cli_sync_%d", time.Now().UnixNano())
+	deltaName := "delta_public_" + tableName
+	trackTableName := "track_public_" + tableName
+	defer dropTables(source, target, tableName, deltaName, trackTableName)
+	for _, pool := range []*pgxpool.Pool{source, target} {
+		if _, err := pool.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	configFile := writeCLIConfig(t, sourceDSN, targetDSN, syncName, tableName)
+	defer os.Remove(configFile)
+	applyOutput := runCLI(t, ctx, "apply", configFile)
+	if !strings.Contains(applyOutput, "configuration applied") {
+		t.Fatalf("unexpected apply output: %s", applyOutput)
+	}
+	runOutput := runCLI(t, ctx, "run", configFile, "--sync", syncName)
+	if !strings.Contains(runOutput, "status=empty") {
+		t.Fatalf("expected empty CLI output, got: %s", runOutput)
+	}
+	assertSyncrunStatus(t, ctx, source, syncName, "empty", "false", "false", "true")
+
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'cli-good')"); err != nil {
+		t.Fatal(err)
+	}
+	runOutput = runCLI(t, ctx, "run", configFile, "--sync", syncName)
+	if !strings.Contains(runOutput, "status=good") {
+		t.Fatalf("expected good CLI output, got: %s", runOutput)
+	}
+	assertSyncrunStatus(t, ctx, source, syncName, "good", "true", "false", "false")
+
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (2, 'cli-bad')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := target.Exec(ctx, "DROP TABLE "+qualified("public", tableName)); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := runCLIAllowFailure(ctx, "run", configFile, "--sync", syncName); err == nil || !strings.Contains(output, "status=bad") {
+		t.Fatalf("expected bad CLI run, output=%s err=%v", output, err)
+	}
+	assertSyncrunStatus(t, ctx, source, syncName, "bad", "false", "true", "false")
+}
+
+func writeCLIConfig(t *testing.T, sourceDSN, targetDSN, syncName, tableName string) string {
+	t.Helper()
+	file, err := os.CreateTemp("", "bucardo-g-cli-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := file.Name()
+	defer file.Close()
+	content := fmt.Sprintf("controlDatabase:\n  dsn: %s\ndatabases:\n  - name: source\n    role: source\n    dsn: %s\n  - name: target\n    role: target\n    dsn: %s\nsyncs:\n  - name: %s\n    source: source\n    target: target\n    tables:\n      - schema: public\n        name: %s\n        primaryKey: [id]\n", sourceDSN, sourceDSN, targetDSN, syncName, tableName)
+	if _, err := file.WriteString(content); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func runCLI(t *testing.T, ctx context.Context, args ...string) string {
+	t.Helper()
+	output, err := runCLIAllowFailure(ctx, args...)
+	if err != nil {
+		t.Fatalf("CLI %v failed: %v\n%s", args, err, output)
+	}
+	return output
+}
+
+func runCLIAllowFailure(ctx context.Context, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, "go", append([]string{"run", "../cmd/bucardo-g", "--log-format", "text", "--log-level", "error"}, args...)...)
+	output, err := command.CombinedOutput()
+	return string(output), err
+}
+
+func assertSyncrunStatus(t *testing.T, ctx context.Context, source *pgxpool.Pool, syncName, status, lastGood, lastBad, lastEmpty string) {
+	t.Helper()
+	var actualStatus string
+	var actualGood, actualBad, actualEmpty bool
+	err := source.QueryRow(ctx, `SELECT status, lastgood, lastbad, lastempty FROM bucardo.syncrun WHERE sync = $1 ORDER BY started DESC LIMIT 1`, syncName).Scan(&actualStatus, &actualGood, &actualBad, &actualEmpty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actualStatus != status || fmt.Sprint(actualGood) != lastGood || fmt.Sprint(actualBad) != lastBad || fmt.Sprint(actualEmpty) != lastEmpty {
+		t.Fatalf("unexpected syncrun status: status=%s good=%t bad=%t empty=%t", actualStatus, actualGood, actualBad, actualEmpty)
+	}
+}
+
+func assertDeltaCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, relation string, expected int) {
+	t.Helper()
+	var actual int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM "+relation).Scan(&actual); err != nil {
+		t.Fatal(err)
+	}
+	if actual != expected {
+		t.Fatalf("unexpected delta count: got %d want %d", actual, expected)
+	}
 }
 
 func openPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {

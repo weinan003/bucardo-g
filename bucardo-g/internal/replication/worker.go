@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/bucardo-g/internal/control"
@@ -18,6 +19,8 @@ type Stats struct {
 }
 
 func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
+	logger := slog.Default()
+	logger.Debug("replication worker started", "sync", sync.Name, "tables", len(sync.Tables))
 	source, err := pgxpool.New(ctx, sync.Source.DSN)
 	if err != nil {
 		return Stats{}, fmt.Errorf("open source database: %w", err)
@@ -50,7 +53,9 @@ func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 		stats.Inserts += tableStats.Inserts
 		stats.Updates += tableStats.Updates
 		stats.Deletes += tableStats.Deletes
+		logger.Debug("table replication completed", "sync", sync.Name, "schema", relation.Schema, "table", relation.Name, "inserts", tableStats.Inserts, "updates", tableStats.Updates, "deletes", tableStats.Deletes)
 	}
+	logger.Debug("replication worker completed", "sync", sync.Name, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
 	return stats, nil
 }
 
@@ -111,6 +116,7 @@ func copyTable(ctx context.Context, source, target *pgxpool.Pool, targetName str
 	if err := deltaRows.Err(); err != nil {
 		return Stats{}, fmt.Errorf("iterate delta table: %w", err)
 	}
+	slog.Default().Debug("delta rows loaded", "schema", relation.Schema, "table", relation.Name, "rows", len(txntimes), "target", targetName)
 	if err := tx.Commit(ctx); err != nil {
 		return Stats{}, fmt.Errorf("commit target transaction: %w", err)
 	}

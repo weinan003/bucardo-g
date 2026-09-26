@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/bucardo-g/internal/config"
@@ -11,6 +12,7 @@ import (
 )
 
 func (s *Store) ApplyConfig(ctx context.Context, cfg config.Config) error {
+	logger := slog.Default()
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -89,6 +91,7 @@ func (s *Store) ApplyConfig(ctx context.Context, cfg config.Config) error {
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit config apply: %w", err)
 	}
+	logger.Info("control configuration committed", "databases", len(cfg.Databases), "syncs", len(cfg.Syncs))
 	return nil
 }
 

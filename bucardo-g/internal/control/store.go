@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ type Store struct{ pool *pgxpool.Pool }
 type SyncLock struct{ conn *pgx.Conn }
 
 func Open(ctx context.Context, dsn string) (*Store, error) {
+	logger := slog.Default()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open control database: %w", err)
@@ -44,12 +46,14 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
+	logger.Debug("control database ready")
 	return &Store{pool: pool}, nil
 }
 
 func (s *Store) Close() { s.pool.Close() }
 
 func (s *Store) TryLockSync(ctx context.Context, syncName string) (*SyncLock, error) {
+	logger := slog.Default()
 	conn, err := pgx.ConnectConfig(ctx, s.pool.Config().ConnConfig.Copy())
 	if err != nil {
 		return nil, fmt.Errorf("connect for sync lock: %w", err)
@@ -61,9 +65,11 @@ func (s *Store) TryLockSync(ctx context.Context, syncName string) (*SyncLock, er
 		return nil, fmt.Errorf("acquire sync lock %q: %w", syncName, err)
 	}
 	if !acquired {
+		logger.Warn("sync lock is already held", "sync", syncName)
 		_ = conn.Close(ctx)
 		return nil, fmt.Errorf("sync %q is already running", syncName)
 	}
+	logger.Debug("sync lock acquired", "sync", syncName)
 	return &SyncLock{conn: conn}, nil
 }
 

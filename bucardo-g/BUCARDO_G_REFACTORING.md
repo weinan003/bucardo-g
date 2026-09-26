@@ -199,7 +199,7 @@ Bucardo-G 当前已具备一个 PostgreSQL-only 的单次复制 MVP，可使用�
 控制库配置运行：
 
 ```text
-go run ./cmd/bucardo-g -control-dsn "<控制库连接串>" -sync "<sync 名称>"
+go run ./cmd/bucardo-g run bucardo.yaml --sync "<sync 名称>"
 ```
 
 该命令会读取 active sync 的单源、单目标和 herd 表定义，读取源端已有的
@@ -532,6 +532,10 @@ fixture；包内单测只覆盖局部规则，跨包行为必须进入这里。�
    重试同一 delta 并收敛。
 4. `TestRegression004MetadataBootstrap`：自动创建控制 schema、delta/track 表和
    delta trigger，并验证业务变更进入 delta。
+5. `TestRegression005TriggerUpdateDeleteRollback`：验证 UPDATE、DELETE 和 rollback
+   的 delta trigger 行为。
+6. `TestRegression006CLIAndSyncrunStatuses`：验证 CLI apply/run 及 empty、good、bad
+   的 syncrun 持久化状态。
 
 运行回归套件：
 
@@ -541,8 +545,8 @@ BUCARDO_TEST_TARGET_DSN='postgres://...:25432/postgres?sslmode=disable' \
 go test ./regress -count=1 -v
 ```
 
-后续用例按 `005` 起连续编号，优先加入 delta trigger 的 UPDATE/DELETE/rollback 捕获、多目标
-确认和 CLI/syncrun 观测。每个用例必须断言持久化状态、DML 计数和失败结果，不能依赖
+后续用例按 `007` 起连续编号，优先加入多目标确认。每个用例必须
+断言持久化状态、DML 计数和失败结果，不能依赖
 日志文本、PID 或绝对时间戳。
 
 ## 7.7 差分测试
