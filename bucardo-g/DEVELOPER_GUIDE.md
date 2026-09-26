@@ -15,6 +15,10 @@ regress/                    面向公开行为的 PostgreSQL 黑盒回归
 模块路径为 `github.com/bucardo-g`。当前实现使用 `pgx/v5` 和 `pgxpool`，不引入
 Perl DBI，也不依赖 Unix 专有进程 API。
 
+项目代码使用 `LICENSE` 中的 BSD 2-Clause License，来源和上游版权边界记录在
+`NOTICE`。Bucardo-G 明确是 Bucardo 的 Go 语言重构；涉及上游代码、文档或第三方依赖
+时，必须保留其原有版权和许可证要求。
+
 日志统一使用 `log/slog`。CLI 根命令通过 `--log-level` 和 `--log-format` 配置全局
 handler，默认 JSON/info 输出到 stderr。控制层和复制层使用结构化字段记录 sync、
 数据库逻辑名、schema/table、批次计数和错误；禁止把 DSN、密码或业务行写入日志。
@@ -47,6 +51,17 @@ syncs:
 
 程序内部会按 Sync 名称生成 target group，并为每个 target 独立写入 stage/track；只有
 所有 target 都确认后才清理 delta。
+
+多 source 拓扑可以使用：
+
+```yaml
+sources: [database_a, database_b]
+targets: [database_a, database_b]
+```
+
+当前 `ApplyConfig` 会为每个 source 写入 goat/herdmap，但 worker 尚未合并多个 source
+的 delta，也未实现冲突规则和 replication-origin 回环抑制；在这些能力完成前不要运行
+多 source 配置。
 
 控制库由 `internal/control.Store` 访问。`control.Open` 首先执行
 `internal/control/schema.go` 中的幂等 migration，然后 `LoadSync` 解析：
@@ -114,7 +129,8 @@ go vet ./...
 - `007`：多目标确认和清理；已在 15432/25432 验证；
 - `008`：过期 stage 恢复和 VAC delta 清理；已在 15432/25432 验证；
 - `009`：LISTEN/NOTIFY 手工 kick；已在 15432 验证；
-- `010`：取消、通知和跨平台运行时。
+- `010`：A/B 多 source 双向无回环复制；已在 15432/25432 验证；
+- `011`：取消、通知和跨平台运行时。
 
 执行：
 

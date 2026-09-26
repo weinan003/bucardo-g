@@ -1,3 +1,4 @@
+// Package table models source relations and their primary-key metadata.
 package table
 
 import (

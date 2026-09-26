@@ -1,3 +1,4 @@
+// Package logging configures the process-wide slog handler used by all layers.
 package logging
 
 import (

@@ -1,3 +1,5 @@
+// Command bucardo-g is the cross-platform CLI for configuration, one-shot runs,
+// manual kicks, and the notification-driven serve loop.
 package main
 
 import (
@@ -204,6 +206,8 @@ func run(controlDSN, syncName string) (runErr error) {
 }
 
 func runWithContext(ctx context.Context, controlDSN, syncName string) (runErr error) {
+	// The lock covers topology loading through replication and run recording, so
+	// two controllers cannot consume the same Sync concurrently.
 	logger := slog.Default()
 	logger.Info("sync run started", "sync", syncName)
 	store, err := control.Open(ctx, controlDSN)

@@ -1,3 +1,6 @@
+// Package replication implements the PostgreSQL data plane. A run reads source
+// delta queues, applies rows in target transactions, confirms track entries, and
+// cleans only changes confirmed by every required target.
 package replication
 
 import (
@@ -21,14 +24,27 @@ type Stats struct {
 func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 	logger := slog.Default()
 	logger.Debug("replication worker started", "sync", sync.Name, "tables", len(sync.Tables))
-	source, err := pgxpool.New(ctx, sync.Source.DSN)
-	if err != nil {
-		return Stats{}, fmt.Errorf("open source database: %w", err)
+	sources := sync.Sources
+	if len(sources) == 0 {
+		sources = []control.Database{sync.Source}
 	}
-	defer source.Close()
-	if err := source.Ping(ctx); err != nil {
-		return Stats{}, fmt.Errorf("ping source database: %w", err)
+	sourcePools := make(map[string]*pgxpool.Pool, len(sources))
+	for _, sourceConfig := range sources {
+		pool, err := pgxpool.New(ctx, sourceConfig.DSN)
+		if err != nil {
+			return Stats{}, fmt.Errorf("open source database %q: %w", sourceConfig.Name, err)
+		}
+		if err := pool.Ping(ctx); err != nil {
+			pool.Close()
+			return Stats{}, fmt.Errorf("ping source database %q: %w", sourceConfig.Name, err)
+		}
+		sourcePools[sourceConfig.Name] = pool
 	}
+	defer func() {
+		for _, pool := range sourcePools {
+			pool.Close()
+		}
+	}()
 	targets := sync.Targets
 	if len(targets) == 0 {
 		targets = []control.Database{sync.Target}
@@ -43,48 +59,51 @@ func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 	}
 
 	var stats Stats
-	for _, relation := range sync.Tables {
-		if relation.Relation != table.RelationTable {
-			continue
-		}
-		if err := ensureReplicationObjects(ctx, source, relation); err != nil {
-			return stats, fmt.Errorf("prepare replication metadata for %s.%s: %w", relation.Schema, relation.Name, err)
-		}
-		if err := recoverStaleStages(ctx, source, relation, targetNames); err != nil {
-			return stats, err
-		}
-	}
+	// Targets are processed serially so a failed later target cannot prevent an
+	// earlier target from recording its confirmation.
 	for i, targetConfig := range targets {
 		target, err := pgxpool.New(ctx, targetConfig.DSN)
 		if err != nil {
-			return stats, fmt.Errorf("open target database %q: %w", targetConfig.Name, err)
+			return Stats{}, fmt.Errorf("open target database %q: %w", targetConfig.Name, err)
 		}
 		if err := target.Ping(ctx); err != nil {
 			target.Close()
-			return stats, fmt.Errorf("ping target database %q: %w", targetConfig.Name, err)
+			return Stats{}, fmt.Errorf("ping target database %q: %w", targetConfig.Name, err)
 		}
-		for _, relation := range sync.Tables {
-			if relation.Relation != table.RelationTable {
-				continue
+		for _, sourceConfig := range sources {
+			source := sourcePools[sourceConfig.Name]
+			for _, relation := range sync.Tables {
+				if relation.Relation != table.RelationTable || (relation.Database != "" && relation.Database != sourceConfig.Name) {
+					continue
+				}
+				if err := ensureReplicationObjects(ctx, source, relation); err != nil {
+					return Stats{}, fmt.Errorf("prepare replication metadata for %s.%s on %s: %w", relation.Schema, relation.Name, sourceConfig.Name, err)
+				}
+				if err := recoverStaleStages(ctx, source, relation, targetNames); err != nil {
+					return Stats{}, err
+				}
+				tableStats, err := copyTable(ctx, source, target, targetNames[i], relation)
+				if err != nil {
+					target.Close()
+					return Stats{}, fmt.Errorf("copy %s.%s from %s to %s: %w", relation.Schema, relation.Name, sourceConfig.Name, targetConfig.Name, err)
+				}
+				stats.Inserts += tableStats.Inserts
+				stats.Updates += tableStats.Updates
+				stats.Deletes += tableStats.Deletes
+				logger.Debug("table replication completed", "sync", sync.Name, "source", sourceConfig.Name, "target", targetConfig.Name, "schema", relation.Schema, "table", relation.Name, "inserts", tableStats.Inserts, "updates", tableStats.Updates, "deletes", tableStats.Deletes)
 			}
-			tableStats, err := copyTable(ctx, source, target, targetNames[i], relation)
-			if err != nil {
-				target.Close()
-				return stats, fmt.Errorf("copy %s.%s to %s: %w", relation.Schema, relation.Name, targetConfig.Name, err)
-			}
-			stats.Inserts += tableStats.Inserts
-			stats.Updates += tableStats.Updates
-			stats.Deletes += tableStats.Deletes
-			logger.Debug("table replication completed", "sync", sync.Name, "target", targetConfig.Name, "schema", relation.Schema, "table", relation.Name, "inserts", tableStats.Inserts, "updates", tableStats.Updates, "deletes", tableStats.Deletes)
 		}
 		target.Close()
 	}
-	for _, relation := range sync.Tables {
-		if relation.Relation != table.RelationTable {
-			continue
-		}
-		if err := cleanupDelta(ctx, source, relation, targetNames); err != nil {
-			return stats, err
+	for _, sourceConfig := range sources {
+		source := sourcePools[sourceConfig.Name]
+		for _, relation := range sync.Tables {
+			if relation.Relation != table.RelationTable || (relation.Database != "" && relation.Database != sourceConfig.Name) {
+				continue
+			}
+			if err := cleanupDelta(ctx, source, relation, targetNames); err != nil {
+				return Stats{}, err
+			}
 		}
 	}
 	logger.Debug("replication worker completed", "sync", sync.Name, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
@@ -108,6 +127,9 @@ func copyTable(ctx context.Context, source, target *pgxpool.Pool, targetName str
 		return Stats{}, fmt.Errorf("begin target transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT set_config('bucardo_g.replication_write', 'on', true)`); err != nil {
+		return Stats{}, fmt.Errorf("set replication write mode: %w", err)
+	}
 	var stats Stats
 	fields := deltaRows.FieldDescriptions()
 	if len(fields) < len(relation.PrimaryKey)+1 {

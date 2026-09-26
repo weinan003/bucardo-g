@@ -512,6 +512,66 @@ func TestRegression009KickNotification(t *testing.T) {
 	}
 }
 
+func TestRegression010BidirectionalReplicationWithoutLoop(t *testing.T) {
+	sourceDSN := os.Getenv("BUCARDO_TEST_SOURCE_DSN")
+	targetDSN := os.Getenv("BUCARDO_TEST_TARGET_DSN")
+	if sourceDSN == "" || targetDSN == "" {
+		t.Skip("BUCARDO_TEST_SOURCE_DSN and BUCARDO_TEST_TARGET_DSN are not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	a := openPool(t, ctx, sourceDSN)
+	defer a.Close()
+	b := openPool(t, ctx, targetDSN)
+	defer b.Close()
+	tableName := fmt.Sprintf("bucardo_g_bidir_%d", time.Now().UnixNano())
+	deltaName := "delta_public_" + tableName
+	trackTableName := "track_public_" + tableName
+	defer dropTables(a, b, tableName, deltaName, trackTableName)
+	for _, pool := range []*pgxpool.Pool{a, b} {
+		if _, err := pool.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relationA := table.Table{ID: 1, Database: "source_a", Schema: "public", Name: tableName, Relation: table.RelationTable, PrimaryKey: []string{"id"}}
+	relationB := relationA
+	relationB.ID = 2
+	relationB.Database = "source_b"
+	topology := control.Sync{
+		Name:   "regress_bidirectional",
+		Source: control.Database{Name: "source_a", DSN: sourceDSN},
+		Sources: []control.Database{
+			{Name: "source_a", DSN: sourceDSN},
+			{Name: "source_b", DSN: targetDSN},
+		},
+		Target: control.Database{Name: "target_a", DSN: sourceDSN},
+		Targets: []control.Database{
+			{Name: "target_a", DSN: sourceDSN},
+			{Name: "target_b", DSN: targetDSN},
+		},
+		TargetName: "dbgroup regress_bidirectional_targets",
+		Tables:     []table.Table{relationA, relationB},
+	}
+	if _, err := replication.RunOnce(ctx, topology); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'from-a')"); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := replication.RunOnce(ctx, topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats != (replication.Stats{Inserts: 1, Updates: 1}) {
+		t.Fatalf("unexpected bidirectional stats: %+v", stats)
+	}
+	assertRows(t, ctx, b, qualified("public", tableName), []string{"1:from-a"})
+	assertDeltaCount(t, ctx, b, qualified("bucardo", deltaName), 0)
+	assertDeltaCount(t, ctx, a, qualified("bucardo", deltaName), 0)
+	assertTrackCount(t, ctx, a, qualified("bucardo", trackTableName), "target_a", 1)
+	assertTrackCount(t, ctx, a, qualified("bucardo", trackTableName), "target_b", 1)
+}
+
 func writeCLIConfig(t *testing.T, sourceDSN, targetDSN, syncName, tableName string) string {
 	t.Helper()
 	file, err := os.CreateTemp("", "bucardo-g-cli-*.yaml")

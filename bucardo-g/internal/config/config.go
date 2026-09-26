@@ -1,3 +1,5 @@
+// Package config defines the user-facing YAML configuration and its validation.
+// The configuration is declarative; control-table rows are a derived projection.
 package config
 
 import (
@@ -10,28 +12,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const template = `controlDatabase:
-  dsn: postgres://user:password@127.0.0.1:5432/bucardo?sslmode=disable
-
-databases:
-  - name: source
-    role: source
-    dsn: postgres://user:password@127.0.0.1:5432/source?sslmode=disable
-  - name: target
-    role: target
-    dsn: postgres://user:password@127.0.0.1:5433/target?sslmode=disable
-
-syncs:
-  - name: example_sync
-    source: source
-    target: target
-    deleteMethod: delete
-    tables:
-      - schema: public
-        name: example_table
-        primaryKey:
-          - id
-`
+const template = "controlDatabase:\n" +
+	"  dsn: postgres://user:password@127.0.0.1:5432/bucardo?sslmode=disable\n\n" +
+	"databases:\n" +
+	"  - name: source_a\n    role: source\n    dsn: postgres://user:password@127.0.0.1:5432/source_a?sslmode=disable\n" +
+	"  - name: source_b\n    role: source\n    dsn: postgres://user:password@127.0.0.1:5433/source_b?sslmode=disable\n" +
+	"  - name: target_a\n    role: target\n    dsn: postgres://user:password@127.0.0.1:5434/target_a?sslmode=disable\n" +
+	"  - name: target_b\n    role: target\n    dsn: postgres://user:password@127.0.0.1:5435/target_b?sslmode=disable\n\n" +
+	"syncs:\n  - name: bidirectional_sync\n    sources:\n      - source_a\n      - source_b\n    targets:\n      - target_a\n      - target_b\n    deleteMethod: delete\n    tables:\n      - schema: public\n        name: example_table\n        primaryKey:\n          - id\n"
 
 var namePattern = regexp.MustCompile(`^[A-Za-z]\w*$`)
 
@@ -54,6 +42,7 @@ type Database struct {
 type Sync struct {
 	Name         string   `yaml:"name"`
 	Source       string   `yaml:"source"`
+	Sources      []string `yaml:"sources"`
 	Target       string   `yaml:"target"`
 	Targets      []string `yaml:"targets"`
 	DeleteMethod string   `yaml:"deleteMethod"`
@@ -83,6 +72,8 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// WriteTemplate creates a new multi-source/multi-target configuration template.
+// O_EXCL is intentional: init must never overwrite an existing policy file.
 func WriteTemplate(path string) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -122,8 +113,22 @@ func (c Config) Validate() error {
 		if !namePattern.MatchString(sync.Name) {
 			return fmt.Errorf("sync name %q is invalid", sync.Name)
 		}
-		if !seen[sync.Source] {
-			return fmt.Errorf("sync %q references an unknown database", sync.Name)
+		sources := sync.SourceNames()
+		if sync.Source != "" && len(sync.Sources) > 0 {
+			return fmt.Errorf("sync %q must use source or sources, not both", sync.Name)
+		}
+		if len(sources) == 0 {
+			return fmt.Errorf("sync %q requires source or sources", sync.Name)
+		}
+		sourceSeen := make(map[string]bool)
+		for _, source := range sources {
+			if sourceSeen[source] {
+				return fmt.Errorf("sync %q repeats source %q", sync.Name, source)
+			}
+			sourceSeen[source] = true
+			if !seen[source] {
+				return fmt.Errorf("sync %q references unknown source database %q", sync.Name, source)
+			}
 		}
 		if sync.Target != "" && len(sync.Targets) > 0 {
 			return fmt.Errorf("sync %q must use target or targets, not both", sync.Name)
@@ -141,8 +146,10 @@ func (c Config) Validate() error {
 			if !seen[target] {
 				return fmt.Errorf("sync %q references unknown target database %q", sync.Name, target)
 			}
-			if sync.Source == target {
-				return fmt.Errorf("sync %q source and target must differ", sync.Name)
+			for _, source := range sources {
+				if source == target {
+					return fmt.Errorf("sync %q source and target must differ", sync.Name)
+				}
 			}
 		}
 		if sync.DeleteMethod == "" {
@@ -175,6 +182,16 @@ func (s Sync) TargetNames() []string {
 		return nil
 	}
 	return []string{s.Target}
+}
+
+func (s Sync) SourceNames() []string {
+	if len(s.Sources) > 0 {
+		return append([]string(nil), s.Sources...)
+	}
+	if s.Source == "" {
+		return nil
+	}
+	return []string{s.Source}
 }
 
 func (s Sync) DomainTables(databaseName string) []table.Table {

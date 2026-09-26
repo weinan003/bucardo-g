@@ -19,6 +19,8 @@ type DailyFileWriter struct {
 	file       *os.File
 }
 
+// NewDailyFileWriter creates a date-suffixed writer such as
+// bucardo-g-2026-09-26.log and removes files older than retentionDays.
 func NewDailyFileWriter(basePath string, retentionDays int) (*DailyFileWriter, error) {
 	if basePath == "" {
 		return nil, fmt.Errorf("log file path is required")

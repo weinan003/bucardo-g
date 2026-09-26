@@ -1,3 +1,5 @@
+// Package control owns Bucardo control-database access, configuration projection,
+// run history, advisory locks, and PostgreSQL notifications.
 package control
 
 import (

@@ -1,0 +1,13 @@
+Bucardo-G
+
+Bucardo-G is an independent Go-language refactoring of Bucardo. It is not the
+official Bucardo distribution.
+
+The original Bucardo project and its original Perl code and documentation are
+Copyright (c) 2005-2025 Greg Sabino Mullane <greg@turnstep.com> and are
+distributed under their own BSD-style license. Any original Bucardo material
+included in a distribution of Bucardo-G remains subject to its original
+copyright and license notices.
+
+Bucardo-G source code is provided under the BSD 2-Clause License in LICENSE.
+Third-party dependencies retain their own copyright and license terms.

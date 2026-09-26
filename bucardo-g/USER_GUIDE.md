@@ -2,6 +2,10 @@
 
 ## 1. 产品范围
 
+本项目是 Bucardo 的 Go 语言重构，代码使用 `LICENSE` 中的 BSD 2-Clause License，来源
+说明见 `NOTICE`。它不是原 Bucardo 官方发行版；
+部署和再发布前请同时检查原 Bucardo 及第三方依赖的许可证要求。
+
 Bucardo-G 是 Bucardo 的 Go 重构版本。当前可运行版本只支持：
 
 - PostgreSQL 源端到 PostgreSQL 目标端；
@@ -64,17 +68,27 @@ controlDatabase:
   dsn: postgres://wwn@127.0.0.1:15432/postgres?sslmode=disable
 
 databases:
-  - name: source
+  - name: source_a
     role: source
     dsn: postgres://wwn@127.0.0.1:15432/postgres?sslmode=disable
-  - name: target
+  - name: source_b
+    role: source
+    dsn: postgres://wwn@127.0.0.1:25432/postgres?sslmode=disable
+  - name: target_a
+    role: target
+    dsn: postgres://wwn@127.0.0.1:15432/postgres?sslmode=disable
+  - name: target_b
     role: target
     dsn: postgres://wwn@127.0.0.1:25432/postgres?sslmode=disable
 
 syncs:
-  - name: example_sync
-    source: source
-    target: target
+  - name: bidirectional_sync
+    sources:
+      - source_a
+      - source_b
+    targets:
+      - target_a
+      - target_b
     deleteMethod: delete
     tables:
       - schema: public

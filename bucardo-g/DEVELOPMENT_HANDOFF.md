@@ -76,6 +76,18 @@ go run .\cmd\bucardo-g `
 - 完整旧版 Bucardo schema 的历史过程函数和兼容对象。
 
 ## 验证状态
+当前工作状态（2026-09-26）：
+
+- 已完成：配置 migration、YAML init/apply、Cobra run/kick/serve、slog 日志和按日期
+  文件滚动；
+- 已完成：单 source、多 target、stage/track、VAC、过期 stage 恢复和 LISTEN/NOTIFY；
+- 已完成：多 source worker、复制写入 bypass 和 A/B 无冲突双向同步回归；
+- 尚未完成：ConflictRule、并发写入冲突、全局冲突排序、sequence/TRUNCATE、完整
+  服务托管和 Perl/Bucardo-G 差分测试。
+
+许可说明：`LICENSE` 使用 BSD 2-Clause License，`NOTICE` 明确本项目是 Bucardo 的
+Go 语言重构，不代表原 Bucardo 官方发行版，并记录原 Bucardo 和第三方依赖的版权边界。
+
 2026-09-26 后续验证：advisory lock 的互斥/释放集成测试分别通过本机 15432 和
 25432 PostgreSQL 实例；`go test ./...`、`go vet ./...` 以及 Windows/Linux amd64
 交叉构建均通过。
@@ -102,6 +114,11 @@ DELETE 正确写入 delta，事务 rollback 不产生 delta。
 
 2026-09-26 回归用例 `009_kick_notification` 已通过 15432：控制库 LISTEN/NOTIFY
 能够发布并接收 `kick_sync_<sync>` 手工 kick payload。
+
+2026-09-26 双向同步推进：YAML/Apply 已支持 `sources: [...]` 多 source 拓扑并为每个
+source 建立 goat/herdmap 映射；回归用例 `010_bidirectional_no_loop` 已通过 15432/25432，
+worker 可将 A 的变更复制到 B，并通过事务级 bypass 避免 B 的 trigger 产生回流 delta。
+当前双向链路只保证无冲突变更，ConflictRule 和并发冲突处理尚未实现。
 
 `regress/` 已建立 PostgreSQL regress 风格的黑盒回归入口：
 

@@ -1,3 +1,4 @@
+// Package job models the lifecycle and terminal status of one Sync run.
 package job
 
 import (

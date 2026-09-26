@@ -542,6 +542,8 @@ fixture；包内单测只覆盖局部规则，跨包行为必须进入这里。�
 8. `TestRegression008StageRecoveryAndVacuum`：验证过期 stage 回收和已确认 delta
    清理。
 9. `TestRegression009KickNotification`：验证 PostgreSQL LISTEN/NOTIFY 手工 kick。
+10. `TestRegression010BidirectionalReplicationWithoutLoop`：验证 A/B 多 source 双向
+   复制和 trigger 回环抑制。
 
 运行回归套件：
 
@@ -551,7 +553,7 @@ BUCARDO_TEST_TARGET_DSN='postgres://...:25432/postgres?sslmode=disable' \
 go test ./regress -count=1 -v
 ```
 
-后续用例按 `010` 起连续编号，优先加入 serve 取消和重连。每个用例必须
+后续用例按 `011` 起连续编号，优先加入 ConflictRule、并发冲突、serve 取消和重连。每个用例必须
 断言持久化状态、DML 计数和失败结果，不能依赖
 日志文本、PID 或绝对时间戳。
 

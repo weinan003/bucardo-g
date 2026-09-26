@@ -47,6 +47,8 @@ Regression cases use stable numeric names, similar to PostgreSQL's `sql/` and
 - `008_stage_recovery_vacuum`: stale stage recovery and cleanup of fully tracked
   delta rows.
 - `009_kick_notification`: PostgreSQL LISTEN/NOTIFY manual kick payload.
+- `010_bidirectional_no_loop`: multi-source A/B replication with replication
+  write bypass and no trigger feedback loop.
 
 Each case should assert durable database state and counters, not log wording or
 unstable timestamps. New behavior belongs here once it crosses a package
@@ -54,4 +56,4 @@ boundary; package tests should cover only local helpers and validation rules.
 
 ## Planned cases
 
-- `010_serve_runtime`: cancellation, notification-triggered execution, and graceful shutdown.
+- `011_serve_runtime`: cancellation, notification-triggered execution, and graceful shutdown.

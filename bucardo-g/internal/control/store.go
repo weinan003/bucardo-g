@@ -1,3 +1,5 @@
+// Package control owns Bucardo control-database access, configuration projection,
+// run history, advisory locks, and PostgreSQL notifications.
 package control
 
 import (
@@ -23,6 +25,7 @@ type Database struct {
 type Sync struct {
 	Name       string
 	Source     Database
+	Sources    []Database
 	Target     Database
 	Targets    []Database
 	TargetName string
@@ -135,33 +138,38 @@ func (s *Store) LoadSync(ctx context.Context, name string) (Sync, error) {
 	result.Target = result.Targets[0]
 	result.TargetName = "dbgroup " + targetGroup
 
-	var sourceDB Database
 	var dbName, dbDSN, host, port, dbNameValue, user, pass, conn string
-	err = s.pool.QueryRow(ctx, `
-				SELECT d.name, COALESCE(d.dbdsn, ''), COALESCE(d.dbhost, ''), COALESCE(d.dbport, ''), COALESCE(d.dbname, ''), COALESCE(d.dbuser, ''), COALESCE(d.dbpass, ''), COALESCE(d.dbconn, '')
+	sourceRows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT d.name, COALESCE(d.dbdsn, ''), COALESCE(d.dbhost, ''), COALESCE(d.dbport, ''), COALESCE(d.dbname, ''), COALESCE(d.dbuser, ''), COALESCE(d.dbpass, ''), COALESCE(d.dbconn, '')
 		FROM bucardo.db d
-		WHERE d.name = (
-			SELECT g.db
-			FROM bucardo.goat g
-			JOIN bucardo.herdmap hm ON hm.goat = g.id
-			WHERE hm.herd = $1
-			ORDER BY hm.priority DESC, g.id
-			LIMIT 1
-		) AND d.status = 'active'
-		LIMIT 1`, sourceName,
-	).Scan(&dbName, &dbDSN, &host, &port, &dbNameValue, &user, &pass, &conn)
+		JOIN bucardo.goat g ON g.db = d.name
+		JOIN bucardo.herdmap hm ON hm.goat = g.id
+		WHERE hm.herd = $1 AND d.status = 'active'
+		ORDER BY d.name`, sourceName)
 	if err != nil {
-		return Sync{}, fmt.Errorf("load source database: %w", err)
+		return Sync{}, fmt.Errorf("load source databases: %w", err)
 	}
-	sourceDB = Database{Name: dbName, DSN: buildDSN(dbDSN, host, port, dbNameValue, user, pass, conn)}
-	result.Source = sourceDB
+	defer sourceRows.Close()
+	for sourceRows.Next() {
+		if err := sourceRows.Scan(&dbName, &dbDSN, &host, &port, &dbNameValue, &user, &pass, &conn); err != nil {
+			return Sync{}, fmt.Errorf("read source database: %w", err)
+		}
+		result.Sources = append(result.Sources, Database{Name: dbName, DSN: buildDSN(dbDSN, host, port, dbNameValue, user, pass, conn)})
+	}
+	if err := sourceRows.Err(); err != nil {
+		return Sync{}, fmt.Errorf("iterate source databases: %w", err)
+	}
+	if len(result.Sources) == 0 {
+		return Sync{}, fmt.Errorf("sync %q has no active source database", name)
+	}
+	result.Source = result.Sources[0]
 
 	tableRows, err := s.pool.Query(ctx, `
 		SELECT g.id, g.db, g.schemaname, g.tablename, g.reltype, COALESCE(g.pkey, '')
 		FROM bucardo.goat g
 		JOIN bucardo.herdmap hm ON hm.goat = g.id
-		WHERE hm.herd = $1 AND g.db = $2 AND g.ghost = false
-		ORDER BY g.id`, sourceName, sourceDB.Name)
+				WHERE hm.herd = $1 AND g.ghost = false
+				ORDER BY g.id`, sourceName)
 	if err != nil {
 		return Sync{}, fmt.Errorf("load sync tables: %w", err)
 	}

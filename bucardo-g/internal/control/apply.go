@@ -12,6 +12,8 @@ import (
 )
 
 func (s *Store) ApplyConfig(ctx context.Context, cfg config.Config) error {
+	// Validate and ping first so a failed configuration never partially reaches
+	// the control database transaction.
 	logger := slog.Default()
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -64,29 +66,24 @@ func (s *Store) ApplyConfig(ctx context.Context, cfg config.Config) error {
 			ON CONFLICT (name) DO UPDATE SET herd = EXCLUDED.herd, dbs = EXCLUDED.dbs, status = 'active', deletemethod = EXCLUDED.deletemethod`, syncConfig.Name, herdName, targetGroup, defaultDeleteMethod(syncConfig.DeleteMethod)); err != nil {
 			return fmt.Errorf("apply sync %q: %w", syncConfig.Name, err)
 		}
-		var sourceDatabase string
-		for _, db := range cfg.Databases {
-			if db.Name == syncConfig.Source {
-				sourceDatabase = db.Name
-				break
-			}
-		}
-		for _, item := range syncConfig.Tables {
-			var goatID int64
-			err := tx.QueryRow(ctx, `SELECT id FROM bucardo.goat WHERE db = $1 AND schemaname = $2 AND tablename = $3`, sourceDatabase, item.Schema, item.Name).Scan(&goatID)
-			if err == pgx.ErrNoRows {
-				err = tx.QueryRow(ctx, `
+		for _, sourceDatabase := range syncConfig.SourceNames() {
+			for _, item := range syncConfig.Tables {
+				var goatID int64
+				err := tx.QueryRow(ctx, `SELECT id FROM bucardo.goat WHERE db = $1 AND schemaname = $2 AND tablename = $3`, sourceDatabase, item.Schema, item.Name).Scan(&goatID)
+				if err == pgx.ErrNoRows {
+					err = tx.QueryRow(ctx, `
 					INSERT INTO bucardo.goat (db, schemaname, tablename, reltype, pkey, ghost)
 					VALUES ($1, $2, $3, 'table', $4, false) RETURNING id`, sourceDatabase, item.Schema, item.Name, strings.Join(item.PrimaryKey, "|")).Scan(&goatID)
-			}
-			if err != nil {
-				return fmt.Errorf("apply table %s.%s: %w", item.Schema, item.Name, err)
-			}
-			if _, err := tx.Exec(ctx, `
+				}
+				if err != nil {
+					return fmt.Errorf("apply table %s.%s: %w", item.Schema, item.Name, err)
+				}
+				if _, err := tx.Exec(ctx, `
 				INSERT INTO bucardo.herdmap (herd, goat, priority)
 				VALUES ($1, $2, 100)
 				ON CONFLICT (herd, goat) DO UPDATE SET priority = EXCLUDED.priority`, herdName, goatID); err != nil {
-				return fmt.Errorf("apply herd mapping for %s.%s: %w", item.Schema, item.Name, err)
+					return fmt.Errorf("apply herd mapping for %s.%s: %w", item.Schema, item.Name, err)
+				}
 			}
 		}
 	}

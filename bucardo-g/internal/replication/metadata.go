@@ -54,9 +54,17 @@ func ensureReplicationObjects(ctx context.Context, source *pgxpool.Pool, relatio
 		oldValues[i] = "OLD." + quoteIdent(key)
 		keyChanged[i] = "OLD." + quoteIdent(key) + " IS DISTINCT FROM NEW." + quoteIdent(key)
 	}
+	// The trigger bypass is transaction-local. It prevents writes made by this
+	// worker on a peer database from becoming a new delta and forming a loop.
 	functionSQL := `CREATE OR REPLACE FUNCTION ` + qualifiedName("bucardo", functionName) + `()
 RETURNS trigger LANGUAGE plpgsql AS $bucardo_g$
 BEGIN
+	IF current_setting('bucardo_g.replication_write', true) = 'on' THEN
+		IF TG_OP = 'DELETE' THEN
+			RETURN OLD;
+		END IF;
+		RETURN NEW;
+	END IF;
 	IF TG_OP = 'DELETE' THEN
 		INSERT INTO ` + qualifiedName("bucardo", delta) + ` (` + columns + `, "txntime") VALUES (` + strings.Join(oldValues, ", ") + `, txid_current());
 		RETURN OLD;

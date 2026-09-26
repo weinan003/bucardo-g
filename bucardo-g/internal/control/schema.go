@@ -11,7 +11,8 @@ import (
 const controlSchemaVersion = 1
 
 // ensureSchema installs the control metadata required by the current Go MVP.
-// Each migration is idempotent and recorded for future upgrades.
+// Each migration is idempotent and recorded for future upgrades. It deliberately
+// owns only the Go runtime's compatible subset of the legacy Bucardo schema.
 func ensureSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	logger := slog.Default()
 	statements := []string{
