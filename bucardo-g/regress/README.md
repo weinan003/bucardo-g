@@ -42,6 +42,11 @@ Regression cases use stable numeric names, similar to PostgreSQL's `sql/` and
   behavior for automatically managed delta triggers.
 - `006_cli_syncrun_status`: CLI apply/run plus persisted empty, good, and bad
   syncrun states.
+- `007_multi_target_confirmation`: one target can fail without allowing delta
+  cleanup; recovery confirms the remaining target and then cleans delta.
+- `008_stage_recovery_vacuum`: stale stage recovery and cleanup of fully tracked
+  delta rows.
+- `009_kick_notification`: PostgreSQL LISTEN/NOTIFY manual kick payload.
 
 Each case should assert durable database state and counters, not log wording or
 unstable timestamps. New behavior belongs here once it crosses a package
@@ -49,5 +54,4 @@ boundary; package tests should cover only local helpers and validation rules.
 
 ## Planned cases
 
-- `007_multi_target_confirmation`: cleanup waits until every target is tracked.
-- `008_cross_platform_runtime`: cancellation and graceful shutdown behavior.
+- `010_serve_runtime`: cancellation, notification-triggered execution, and graceful shutdown.

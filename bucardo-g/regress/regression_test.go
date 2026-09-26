@@ -12,6 +12,7 @@ import (
 	"github.com/bucardo-g/internal/control"
 	"github.com/bucardo-g/internal/domain/table"
 	"github.com/bucardo-g/internal/replication"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -174,6 +175,7 @@ func TestRegression003TargetFailureRetry(t *testing.T) {
 		t.Fatal("expected replication to fail while target table is absent")
 	}
 	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "db-target", 0)
+	assertTrackCount(t, ctx, source, qualified("bucardo", "stage_public_"+tableName), "db-target", 1)
 
 	if _, err := target.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
 		t.Fatal(err)
@@ -187,6 +189,7 @@ func TestRegression003TargetFailureRetry(t *testing.T) {
 	}
 	assertRows(t, ctx, target, qualified("public", tableName), []string{"1:retry"})
 	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "db-target", 1)
+	assertTrackCount(t, ctx, source, qualified("bucardo", "stage_public_"+tableName), "db-target", 0)
 }
 
 func TestRegression004MetadataBootstrap(t *testing.T) {
@@ -230,11 +233,11 @@ func TestRegression004MetadataBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	var objectCount int
-	if err := source.QueryRow(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'bucardo' AND c.relname IN ($1, $2)`, deltaName, trackTableName).Scan(&objectCount); err != nil {
+	if err := source.QueryRow(ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'bucardo' AND c.relname IN ($1, $2, $3)`, deltaName, trackTableName, "stage_public_"+tableName).Scan(&objectCount); err != nil {
 		t.Fatal(err)
 	}
-	if objectCount != 2 {
-		t.Fatalf("expected automatically managed delta and track tables, got %d", objectCount)
+	if objectCount != 3 {
+		t.Fatalf("expected automatically managed delta, stage, and track tables, got %d", objectCount)
 	}
 	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'triggered')"); err != nil {
 		t.Fatal(err)
@@ -367,6 +370,148 @@ func TestRegression006CLIAndSyncrunStatuses(t *testing.T) {
 	assertSyncrunStatus(t, ctx, source, syncName, "bad", "false", "true", "false")
 }
 
+func TestRegression007MultiTargetConfirmation(t *testing.T) {
+	sourceDSN := os.Getenv("BUCARDO_TEST_SOURCE_DSN")
+	targetDSN := os.Getenv("BUCARDO_TEST_TARGET_DSN")
+	if sourceDSN == "" || targetDSN == "" {
+		t.Skip("BUCARDO_TEST_SOURCE_DSN and BUCARDO_TEST_TARGET_DSN are not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	source := openPool(t, ctx, sourceDSN)
+	defer source.Close()
+	target := openPool(t, ctx, targetDSN)
+	defer target.Close()
+	tableName := fmt.Sprintf("bucardo_g_multi_%d", time.Now().UnixNano())
+	deltaName := "delta_public_" + tableName
+	trackTableName := "track_public_" + tableName
+	defer dropTables(source, target, tableName, deltaName, trackTableName)
+	for _, pool := range []*pgxpool.Pool{source, target} {
+		if _, err := pool.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	topology := control.Sync{
+		Name:   "regress_multi_target",
+		Source: control.Database{Name: "source", DSN: sourceDSN},
+		Target: control.Database{Name: "target-a", DSN: targetDSN},
+		Targets: []control.Database{
+			{Name: "target-a", DSN: targetDSN},
+			{Name: "target-b", DSN: "postgres://wwn@127.0.0.1:29999/postgres?sslmode=disable"},
+		},
+		TargetName: "dbgroup regress_multi_target_targets",
+		Tables:     []table.Table{{ID: 1, Database: "source", Schema: "public", Name: tableName, Relation: table.RelationTable, PrimaryKey: []string{"id"}}},
+	}
+	topology.Targets = topology.Targets[:1]
+	if _, err := replication.RunOnce(ctx, topology); err != nil {
+		t.Fatal(err)
+	}
+	topology.Targets = []control.Database{
+		{Name: "target-a", DSN: targetDSN},
+		{Name: "target-b", DSN: "postgres://wwn@127.0.0.1:29999/postgres?sslmode=disable"},
+	}
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("public", tableName)+" (id, value) VALUES (1, 'multi')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replication.RunOnce(ctx, topology); err == nil {
+		t.Fatal("expected second target connection to fail")
+	}
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target-a", 1)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target-b", 0)
+	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 1)
+
+	topology.Targets[1].DSN = targetDSN
+	stats, err := replication.RunOnce(ctx, topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats != (replication.Stats{Updates: 1}) {
+		t.Fatalf("unexpected recovery stats: %+v", stats)
+	}
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target-a", 1)
+	assertTrackCount(t, ctx, source, qualified("bucardo", trackTableName), "target-b", 1)
+	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 0)
+}
+
+func TestRegression008StageRecoveryAndVacuum(t *testing.T) {
+	sourceDSN := os.Getenv("BUCARDO_TEST_SOURCE_DSN")
+	targetDSN := os.Getenv("BUCARDO_TEST_TARGET_DSN")
+	if sourceDSN == "" || targetDSN == "" {
+		t.Skip("BUCARDO_TEST_SOURCE_DSN and BUCARDO_TEST_TARGET_DSN are not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	source := openPool(t, ctx, sourceDSN)
+	defer source.Close()
+	target := openPool(t, ctx, targetDSN)
+	defer target.Close()
+	tableName := fmt.Sprintf("bucardo_g_vac_%d", time.Now().UnixNano())
+	deltaName := "delta_public_" + tableName
+	trackTableName := "track_public_" + tableName
+	stageTableName := "stage_public_" + tableName
+	defer dropTables(source, target, tableName, deltaName, trackTableName)
+	for _, pool := range []*pgxpool.Pool{source, target} {
+		if _, err := pool.Exec(ctx, "CREATE TABLE "+qualified("public", tableName)+" (id integer PRIMARY KEY, value text NOT NULL)"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relation := table.Table{ID: 1, Database: "source", Schema: "public", Name: tableName, Relation: table.RelationTable, PrimaryKey: []string{"id"}}
+	if err := replication.EnsureReplicationObjects(ctx, source, relation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("bucardo", stageTableName)+" (txntime, target, started) VALUES (998, 'db-target', now() - interval '2 hours')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("bucardo", deltaName)+" (id, txntime) VALUES (1, 999)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.Exec(ctx, "INSERT INTO "+qualified("bucardo", trackTableName)+" (txntime, target) VALUES (999, 'db-target')"); err != nil {
+		t.Fatal(err)
+	}
+	topology := control.Sync{
+		Name:       "regress_stage_recovery",
+		Source:     control.Database{Name: "source", DSN: sourceDSN},
+		Target:     control.Database{Name: "target", DSN: targetDSN},
+		TargetName: "db-target",
+		Tables:     []table.Table{relation},
+	}
+	if _, err := replication.RunOnce(ctx, topology); err != nil {
+		t.Fatal(err)
+	}
+	assertTrackCount(t, ctx, source, qualified("bucardo", stageTableName), "db-target", 0)
+	assertDeltaCount(t, ctx, source, qualified("bucardo", deltaName), 0)
+}
+
+func TestRegression009KickNotification(t *testing.T) {
+	dsn := os.Getenv("BUCARDO_TEST_CONTROL_DSN")
+	if dsn == "" {
+		dsn = os.Getenv("BUCARDO_TEST_SOURCE_DSN")
+	}
+	if dsn == "" {
+		t.Skip("BUCARDO_TEST_CONTROL_DSN or BUCARDO_TEST_SOURCE_DSN is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(context.Background())
+	if _, err := conn.Exec(ctx, `LISTEN bucardo`); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.NotifyKick(ctx, dsn, "regress_notify_sync"); err != nil {
+		t.Fatal(err)
+	}
+	notification, err := conn.WaitForNotification(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notification.Channel != "bucardo" || notification.Payload != "kick_sync_regress_notify_sync" {
+		t.Fatalf("unexpected notification: channel=%s payload=%s", notification.Channel, notification.Payload)
+	}
+}
+
 func writeCLIConfig(t *testing.T, sourceDSN, targetDSN, syncName, tableName string) string {
 	t.Helper()
 	file, err := os.CreateTemp("", "bucardo-g-cli-*.yaml")
@@ -438,6 +583,7 @@ func dropTables(source, target *pgxpool.Pool, tableName, deltaName, trackName st
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for _, statement := range []string{
+		"DROP TABLE IF EXISTS " + qualified("bucardo", strings.Replace(trackName, "track_", "stage_", 1)),
 		"DROP TABLE IF EXISTS " + qualified("bucardo", trackName),
 		"DROP TABLE IF EXISTS " + qualified("bucardo", deltaName),
 		"DROP TABLE IF EXISTS " + qualified("public", tableName),

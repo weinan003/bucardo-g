@@ -37,6 +37,8 @@ github.com/bucardo-g
   - Cobra CLI、YAML apply、run 和全局 slog 日志参数。
 - `internal/logging/logging.go`
   - 统一配置 JSON/text handler、日志级别和 stderr 输出。
+- `internal/logging/file.go`
+  - 按本地日期滚动日志文件，并按保留天数清理旧文件。
 
 ## 当前 MVP 运行方式
 
@@ -58,18 +60,17 @@ go run .\cmd\bucardo-g `
 - 普通表；
 - 主键驱动的 INSERT、UPDATE、DELETE；
 - 自动管理当前 MVP 所需的 Bucardo delta/track 表；
+- 自动管理 `stage_*`，支持单目标失败恢复和多目标确认；
 - `syncrun` 记录；
 - 通过 session advisory lock 防止同一 Sync 并发执行；
 - Windows/Linux 代码路径不依赖 fork、setsid 或 Unix-only daemon。
 
 尚未支持：
 
-- LISTEN/NOTIFY 自动调度；
-- 常驻 daemon、MCP/CTL/KID 进程模型；
+- 完整常驻 daemon、MCP/CTL/KID 进程模型和平台 Service 包装；
 - 多源冲突和 ConflictRule；
 - TRUNCATE；
 - sequence；
-- VAC；
 - custom code；
 - 完整 PostgreSQL 集成测试 harness（已建立 `regress/` 黑盒用例）；
 - 完整旧版 Bucardo schema 的历史过程函数和兼容对象。
@@ -94,6 +95,13 @@ DELETE 正确写入 delta，事务 rollback 不产生 delta。
 
 2026-09-26 回归用例 `006_cli_syncrun_status` 已通过 15432 -> 25432：CLI apply/run
 完整验证 empty、good、bad 输出、退出码和 `syncrun` 标志位。
+
+2026-09-26 回归用例 `007_multi_target_confirmation` 和 `008_stage_recovery_vacuum`
+已通过 15432 -> 25432：部分 target 成功时不清理 delta，全部确认后清理；过期 stage
+可恢复，已确认 delta 可由 VAC 清理。
+
+2026-09-26 回归用例 `009_kick_notification` 已通过 15432：控制库 LISTEN/NOTIFY
+能够发布并接收 `kick_sync_<sync>` 手工 kick payload。
 
 `regress/` 已建立 PostgreSQL regress 风格的黑盒回归入口：
 
@@ -143,10 +151,8 @@ Linux amd64 交叉构建也已验证。
 按小步增量继续：
 
 1. 为控制库和复制 worker 增加可注入的接口，便于测试。
-2. 扩展 `regress/` fixture，覆盖主键变化、多目标确认和清理。
-3. 增加 LISTEN/NOTIFY 监听器和手工 kick 调度，并将行为加入 regress 用例。
-4. 增加 TRUNCATE、sequence 和多源冲突策略及对应回归场景。
-5. 最后实现常驻服务和 Windows/Linux 服务包装。
+2. 扩展 `serve` 回归，覆盖通知触发复制、取消和重连。
+3. 增加 TRUNCATE、sequence 和多源冲突策略及对应回归场景。
 
 ## 工作区状态说明
 

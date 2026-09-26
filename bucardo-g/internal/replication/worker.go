@@ -26,16 +26,20 @@ func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 		return Stats{}, fmt.Errorf("open source database: %w", err)
 	}
 	defer source.Close()
-	target, err := pgxpool.New(ctx, sync.Target.DSN)
-	if err != nil {
-		return Stats{}, fmt.Errorf("open target database: %w", err)
-	}
-	defer target.Close()
 	if err := source.Ping(ctx); err != nil {
 		return Stats{}, fmt.Errorf("ping source database: %w", err)
 	}
-	if err := target.Ping(ctx); err != nil {
-		return Stats{}, fmt.Errorf("ping target database: %w", err)
+	targets := sync.Targets
+	if len(targets) == 0 {
+		targets = []control.Database{sync.Target}
+	}
+	targetNames := make([]string, len(targets))
+	for i, target := range targets {
+		if len(targets) == 1 {
+			targetNames[i] = sync.TargetName
+		} else {
+			targetNames[i] = target.Name
+		}
 	}
 
 	var stats Stats
@@ -46,14 +50,42 @@ func RunOnce(ctx context.Context, sync control.Sync) (Stats, error) {
 		if err := ensureReplicationObjects(ctx, source, relation); err != nil {
 			return stats, fmt.Errorf("prepare replication metadata for %s.%s: %w", relation.Schema, relation.Name, err)
 		}
-		tableStats, err := copyTable(ctx, source, target, sync.TargetName, relation)
-		if err != nil {
-			return stats, fmt.Errorf("copy %s.%s: %w", relation.Schema, relation.Name, err)
+		if err := recoverStaleStages(ctx, source, relation, targetNames); err != nil {
+			return stats, err
 		}
-		stats.Inserts += tableStats.Inserts
-		stats.Updates += tableStats.Updates
-		stats.Deletes += tableStats.Deletes
-		logger.Debug("table replication completed", "sync", sync.Name, "schema", relation.Schema, "table", relation.Name, "inserts", tableStats.Inserts, "updates", tableStats.Updates, "deletes", tableStats.Deletes)
+	}
+	for i, targetConfig := range targets {
+		target, err := pgxpool.New(ctx, targetConfig.DSN)
+		if err != nil {
+			return stats, fmt.Errorf("open target database %q: %w", targetConfig.Name, err)
+		}
+		if err := target.Ping(ctx); err != nil {
+			target.Close()
+			return stats, fmt.Errorf("ping target database %q: %w", targetConfig.Name, err)
+		}
+		for _, relation := range sync.Tables {
+			if relation.Relation != table.RelationTable {
+				continue
+			}
+			tableStats, err := copyTable(ctx, source, target, targetNames[i], relation)
+			if err != nil {
+				target.Close()
+				return stats, fmt.Errorf("copy %s.%s to %s: %w", relation.Schema, relation.Name, targetConfig.Name, err)
+			}
+			stats.Inserts += tableStats.Inserts
+			stats.Updates += tableStats.Updates
+			stats.Deletes += tableStats.Deletes
+			logger.Debug("table replication completed", "sync", sync.Name, "target", targetConfig.Name, "schema", relation.Schema, "table", relation.Name, "inserts", tableStats.Inserts, "updates", tableStats.Updates, "deletes", tableStats.Deletes)
+		}
+		target.Close()
+	}
+	for _, relation := range sync.Tables {
+		if relation.Relation != table.RelationTable {
+			continue
+		}
+		if err := cleanupDelta(ctx, source, relation, targetNames); err != nil {
+			return stats, err
+		}
 	}
 	logger.Debug("replication worker completed", "sync", sync.Name, "inserts", stats.Inserts, "updates", stats.Updates, "deletes", stats.Deletes)
 	return stats, nil
@@ -88,6 +120,10 @@ func copyTable(ctx context.Context, source, target *pgxpool.Pool, targetName str
 			return Stats{}, fmt.Errorf("read delta row: %w", err)
 		}
 		keys := values[:len(relation.PrimaryKey)]
+		txntime := values[len(relation.PrimaryKey)]
+		if err := markStage(ctx, source, relation, targetName, txntime); err != nil {
+			return Stats{}, err
+		}
 		sourceRow, columns, err := readCurrentRow(ctx, source, relation, keys)
 		if err != nil {
 			return Stats{}, err
@@ -111,7 +147,7 @@ func copyTable(ctx context.Context, source, target *pgxpool.Pool, targetName str
 				stats.Inserts++
 			}
 		}
-		txntimes = append(txntimes, values[len(relation.PrimaryKey)])
+		txntimes = append(txntimes, txntime)
 	}
 	if err := deltaRows.Err(); err != nil {
 		return Stats{}, fmt.Errorf("iterate delta table: %w", err)
@@ -122,6 +158,9 @@ func copyTable(ctx context.Context, source, target *pgxpool.Pool, targetName str
 	}
 	for _, txntime := range txntimes {
 		if err := markTrack(ctx, source, relation, targetName, txntime); err != nil {
+			return Stats{}, err
+		}
+		if err := clearStage(ctx, source, relation, targetName, txntime); err != nil {
 			return Stats{}, err
 		}
 	}
@@ -206,6 +245,58 @@ func markTrack(ctx context.Context, source *pgxpool.Pool, relation table.Table, 
 	_, err := source.Exec(ctx, `INSERT INTO `+quoteIdent("bucardo")+`.`+quoteIdent(trackName(relation))+` (txntime,target) VALUES ($1,$2)`, txntime, target)
 	if err != nil {
 		return fmt.Errorf("mark track table: %w", err)
+	}
+	return nil
+}
+
+func markStage(ctx context.Context, source *pgxpool.Pool, relation table.Table, target string, txntime any) error {
+	_, err := source.Exec(ctx, `INSERT INTO `+quoteIdent("bucardo")+`.`+quoteIdent(stageName(relation))+` (txntime,target) VALUES ($1,$2) ON CONFLICT (txntime,target) DO UPDATE SET started = now()`, txntime, target)
+	if err != nil {
+		return fmt.Errorf("mark stage table: %w", err)
+	}
+	return nil
+}
+
+func clearStage(ctx context.Context, source *pgxpool.Pool, relation table.Table, target string, txntime any) error {
+	_, err := source.Exec(ctx, `DELETE FROM `+quoteIdent("bucardo")+`.`+quoteIdent(stageName(relation))+` WHERE txntime = $1 AND target = $2`, txntime, target)
+	if err != nil {
+		return fmt.Errorf("clear stage table: %w", err)
+	}
+	return nil
+}
+
+func cleanupDelta(ctx context.Context, source *pgxpool.Pool, relation table.Table, targets []string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	delta := "delta_" + relation.Schema + "_" + relation.Name
+	_, err := source.Exec(ctx, `DELETE FROM `+quoteIdent("bucardo")+`.`+quoteIdent(delta)+` d
+		WHERE NOT EXISTS (
+			SELECT 1 FROM unnest($1::text[]) required(target)
+			WHERE NOT EXISTS (
+				SELECT 1 FROM `+quoteIdent("bucardo")+`.`+quoteIdent(trackName(relation))+` t
+				WHERE t.txntime = d.txntime AND t.target = required.target
+			)
+		)`, targets)
+	if err != nil {
+		return fmt.Errorf("clean delta table %s: %w", delta, err)
+	}
+	return nil
+}
+
+func recoverStaleStages(ctx context.Context, source *pgxpool.Pool, relation table.Table, targets []string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	_, err := source.Exec(ctx, `DELETE FROM `+quoteIdent("bucardo")+`.`+quoteIdent(stageName(relation))+` s
+		WHERE s.started < now() - interval '1 hour'
+		AND s.target = ANY($1::text[])
+		AND NOT EXISTS (
+			SELECT 1 FROM `+quoteIdent("bucardo")+`.`+quoteIdent(trackName(relation))+` t
+			WHERE t.txntime = s.txntime AND t.target = s.target
+		)`, targets)
+	if err != nil {
+		return fmt.Errorf("recover stale stage table %s: %w", stageName(relation), err)
 	}
 	return nil
 }

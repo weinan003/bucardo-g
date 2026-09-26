@@ -24,6 +24,7 @@ type Sync struct {
 	Name       string
 	Source     Database
 	Target     Database
+	Targets    []Database
 	TargetName string
 	Tables     []table.Table
 }
@@ -118,16 +119,24 @@ func (s *Store) LoadSync(ctx context.Context, name string) (Sync, error) {
 		return Sync{}, fmt.Errorf("load target databases: %w", err)
 	}
 	defer rows.Close()
-	if !rows.Next() {
+	for rows.Next() {
+		var dbName, dbDSN, host, port, dbNameValue, user, pass, conn string
+		if err := rows.Scan(&dbName, &dbDSN, &host, &port, &dbNameValue, &user, &pass, &conn); err != nil {
+			return Sync{}, fmt.Errorf("read target database: %w", err)
+		}
+		result.Targets = append(result.Targets, Database{Name: dbName, DSN: buildDSN(dbDSN, host, port, dbNameValue, user, pass, conn)})
+	}
+	if err := rows.Err(); err != nil {
+		return Sync{}, fmt.Errorf("iterate target databases: %w", err)
+	}
+	if len(result.Targets) == 0 {
 		return Sync{}, fmt.Errorf("sync %q has no active target database", name)
 	}
-	var dbName, dbDSN, host, port, dbNameValue, user, pass, conn string
-	if err := rows.Scan(&dbName, &dbDSN, &host, &port, &dbNameValue, &user, &pass, &conn); err != nil {
-		return Sync{}, fmt.Errorf("read target database: %w", err)
-	}
-	result.TargetName, result.Target = "dbgroup "+targetGroup, Database{Name: dbName, DSN: buildDSN(dbDSN, host, port, dbNameValue, user, pass, conn)}
+	result.Target = result.Targets[0]
+	result.TargetName = "dbgroup " + targetGroup
 
 	var sourceDB Database
+	var dbName, dbDSN, host, port, dbNameValue, user, pass, conn string
 	err = s.pool.QueryRow(ctx, `
 				SELECT d.name, COALESCE(d.dbdsn, ''), COALESCE(d.dbhost, ''), COALESCE(d.dbport, ''), COALESCE(d.dbname, ''), COALESCE(d.dbuser, ''), COALESCE(d.dbpass, ''), COALESCE(d.dbconn, '')
 		FROM bucardo.db d

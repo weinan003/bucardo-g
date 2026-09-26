@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }
+
 func Configure(levelName, format string, output io.Writer) (*slog.Logger, error) {
 	level, err := parseLevel(levelName)
 	if err != nil {
@@ -29,6 +33,23 @@ func Configure(levelName, format string, output io.Writer) (*slog.Logger, error)
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 	return logger, nil
+}
+
+func ConfigureOutput(levelName, format, filePath string, retentionDays int) (*slog.Logger, io.Closer, error) {
+	if filePath == "" {
+		logger, err := Configure(levelName, format, os.Stderr)
+		return logger, nopCloser{}, err
+	}
+	writer, err := NewDailyFileWriter(filePath, retentionDays)
+	if err != nil {
+		return nil, nil, err
+	}
+	logger, err := Configure(levelName, format, writer)
+	if err != nil {
+		_ = writer.Close()
+		return nil, nil, err
+	}
+	return logger, writer, nil
 }
 
 func parseLevel(value string) (slog.Level, error) {

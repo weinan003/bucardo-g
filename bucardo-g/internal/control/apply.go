@@ -47,11 +47,13 @@ func (s *Store) ApplyConfig(ctx context.Context, cfg config.Config) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO bucardo.dbgroup(name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, targetGroup); err != nil {
 			return fmt.Errorf("apply target group %q: %w", targetGroup, err)
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO bucardo.dbmap (db, dbgroup, role, priority)
-			VALUES ($1, $2, 'target', 100)
-			ON CONFLICT (db, dbgroup, role) DO UPDATE SET priority = EXCLUDED.priority`, syncConfig.Target, targetGroup); err != nil {
-			return fmt.Errorf("apply target mapping for %q: %w", syncConfig.Name, err)
+		for priority, target := range syncConfig.TargetNames() {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO bucardo.dbmap (db, dbgroup, role, priority)
+				VALUES ($1, $2, 'target', $3)
+				ON CONFLICT (db, dbgroup, role) DO UPDATE SET priority = EXCLUDED.priority`, target, targetGroup, len(syncConfig.TargetNames())-priority); err != nil {
+				return fmt.Errorf("apply target mapping for %q: %w", syncConfig.Name, err)
+			}
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO bucardo.herd(name) VALUES ($1) ON CONFLICT (name) DO NOTHING`, herdName); err != nil {
 			return fmt.Errorf("apply herd %q: %w", herdName, err)

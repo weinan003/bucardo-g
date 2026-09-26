@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/bucardo-g/internal/config"
@@ -15,11 +18,19 @@ import (
 )
 
 var (
-	logLevel  string
-	logFormat string
+	logLevel         string
+	logFormat        string
+	logFile          string
+	logRetentionDays int
+	logFileCloser    io.Closer
 )
 
 func main() {
+	defer func() {
+		if logFileCloser != nil {
+			_ = logFileCloser.Close()
+		}
+	}()
 	if err := newRootCommand().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -31,15 +42,22 @@ func newRootCommand() *cobra.Command {
 		Use:   "bucardo-g",
 		Short: "PostgreSQL replication controller",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			_, err := logging.Configure(logLevel, logFormat, os.Stderr)
+			_, closer, err := logging.ConfigureOutput(logLevel, logFormat, logFile, logRetentionDays)
+			if err == nil {
+				logFileCloser = closer
+			}
 			return err
 		},
 	}
 	root.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level: debug, info, warn, or error")
 	root.PersistentFlags().StringVar(&logFormat, "log-format", "json", "log format: json or text")
+	root.PersistentFlags().StringVar(&logFile, "log-file", "", "daily rolling log file path; empty writes to stderr")
+	root.PersistentFlags().IntVar(&logRetentionDays, "log-retention-days", 7, "number of days of rolling logs to retain; 0 disables cleanup")
 	root.AddCommand(newInitCommand())
 	root.AddCommand(newApplyCommand())
 	root.AddCommand(newRunCommand())
+	root.AddCommand(newKickCommand())
+	root.AddCommand(newServeCommand())
 	return root
 }
 
@@ -92,6 +110,71 @@ func newRunCommand() *cobra.Command {
 	return runCommand
 }
 
+func newKickCommand() *cobra.Command {
+	var syncName string
+	kick := &cobra.Command{
+		Use:   "kick <config-file>",
+		Short: "Send a manual kick notification for one Sync",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if syncName == "" {
+				return fmt.Errorf("sync is required")
+			}
+			cfg, err := config.Load(args[0])
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := control.NotifyKick(ctx, cfg.ControlDatabase.DSN, syncName); err != nil {
+				return err
+			}
+			fmt.Printf("kick sent: sync=%s\n", syncName)
+			return nil
+		},
+	}
+	kick.Flags().StringVar(&syncName, "sync", "", "name of the Sync to kick")
+	return kick
+}
+
+func newServeCommand() *cobra.Command {
+	serve := &cobra.Command{
+		Use:   "serve <config-file>",
+		Short: "Listen for kick notifications and run configured Syncs",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(args[0])
+			if err != nil {
+				return err
+			}
+			if err := applyConfig(args[0]); err != nil {
+				return err
+			}
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			logger := slog.Default()
+			configured := make(map[string]bool, len(cfg.Syncs))
+			for _, syncConfig := range cfg.Syncs {
+				configured[syncConfig.Name] = true
+			}
+			logger.Info("serve started")
+			return control.ListenKicks(ctx, cfg.ControlDatabase.DSN, func(ctx context.Context, syncName string) error {
+				if !configured[syncName] {
+					logger.Warn("ignoring kick for unconfigured sync", "sync", syncName)
+					return nil
+				}
+				runCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+				defer cancel()
+				if err := runWithContext(runCtx, cfg.ControlDatabase.DSN, syncName); err != nil {
+					logger.Error("kick sync failed", "sync", syncName, "error", err)
+				}
+				return nil
+			})
+		},
+	}
+	return serve
+}
+
 func applyConfig(configPath string) error {
 	logger := slog.Default()
 	logger.Info("applying configuration", "config_file", configPath)
@@ -115,10 +198,14 @@ func applyConfig(configPath string) error {
 }
 
 func run(controlDSN, syncName string) (runErr error) {
-	logger := slog.Default()
-	logger.Info("sync run started", "sync", syncName)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
+	return runWithContext(ctx, controlDSN, syncName)
+}
+
+func runWithContext(ctx context.Context, controlDSN, syncName string) (runErr error) {
+	logger := slog.Default()
+	logger.Info("sync run started", "sync", syncName)
 	store, err := control.Open(ctx, controlDSN)
 	if err != nil {
 		return err

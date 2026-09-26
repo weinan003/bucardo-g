@@ -18,6 +18,9 @@ Perl DBI，也不依赖 Unix 专有进程 API。
 日志统一使用 `log/slog`。CLI 根命令通过 `--log-level` 和 `--log-format` 配置全局
 handler，默认 JSON/info 输出到 stderr。控制层和复制层使用结构化字段记录 sync、
 数据库逻辑名、schema/table、批次计数和错误；禁止把 DSN、密码或业务行写入日志。
+`--log-file` 使用 `DailyFileWriter` 按本地日期生成 `basename-YYYY-MM-DD.ext` 文件，
+在写入时跨日期切换，并按 `--log-retention-days` 清理过期文件。writer 使用 mutex
+保护跨 goroutine 写入，进程退出时由 CLI 关闭当前文件。
 
 ## 2. 运行边界
 
@@ -28,6 +31,22 @@ handler，默认 JSON/info 输出到 stderr。控制层和复制层使用结构�
 `control.ApplyConfig` 在事务中 upsert `db`、`dbmap`、`goat`、`herdmap` 和 `sync`；
 apply 前会 ping 每个 source/target。配置文件描述用户意图，控制表属于程序生成的
 持久化投影，不应要求用户直接写 SQL。
+
+单目标可以使用 `target`；多目标使用 `targets`，两者不能同时出现：
+
+```yaml
+syncs:
+   - name: fanout_sync
+      source: source
+      targets: [target_a, target_b]
+      tables:
+         - schema: public
+            name: items
+            primaryKey: [id]
+```
+
+程序内部会按 Sync 名称生成 target group，并为每个 target 独立写入 stage/track；只有
+所有 target 都确认后才清理 delta。
 
 控制库由 `internal/control.Store` 访问。`control.Open` 首先执行
 `internal/control/schema.go` 中的幂等 migration，然后 `LoadSync` 解析：
@@ -92,8 +111,10 @@ go vet ./...
 - `004`：自动部署元表、trigger delta 捕获和 rollback；已在 15432/25432 验证；
 - `005`：UPDATE、DELETE、主键变化和 rollback 的 trigger delta；已在 15432 验证；
 - `006`：CLI、syncrun 的 empty/good/bad 和错误结果；已在 15432/25432 验证；
-- `007`：多目标确认和清理；
-- `008`：取消、通知和跨平台运行时。
+- `007`：多目标确认和清理；已在 15432/25432 验证；
+- `008`：过期 stage 恢复和 VAC delta 清理；已在 15432/25432 验证；
+- `009`：LISTEN/NOTIFY 手工 kick；已在 15432 验证；
+- `010`：取消、通知和跨平台运行时。
 
 执行：
 
@@ -133,10 +154,8 @@ go test ./regress -count=1 -v
 
 P0：
 
-1. 目标失败重试 regress；
-2. stage/track 多目标确认和清理；
-3. CLI 的控制库 fixture、syncrun good/bad/empty；
-4. LISTEN/NOTIFY 与手工 kick。
+1. LISTEN/NOTIFY 与手工 kick；
+2. 常驻 `serve`、优雅取消和跨平台服务包装。
 
 P1：
 

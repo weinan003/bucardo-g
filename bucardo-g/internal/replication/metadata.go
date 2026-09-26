@@ -22,6 +22,7 @@ func ensureReplicationObjects(ctx context.Context, source *pgxpool.Pool, relatio
 	}
 
 	delta := "delta_" + relation.Schema + "_" + relation.Name
+	stage := stageName(relation)
 	track := trackName(relation)
 	columns := joinQuoted(relation.PrimaryKey)
 	if _, err := source.Exec(ctx, `CREATE TABLE IF NOT EXISTS `+qualifiedName("bucardo", delta)+
@@ -38,6 +39,10 @@ func ensureReplicationObjects(ctx context.Context, source *pgxpool.Pool, relatio
 	if _, err := source.Exec(ctx, `CREATE TABLE IF NOT EXISTS `+qualifiedName("bucardo", track)+
 		` ("txntime" bigint NOT NULL, "target" text NOT NULL, PRIMARY KEY ("txntime", "target"))`); err != nil {
 		return fmt.Errorf("create track table %s: %w", track, err)
+	}
+	if _, err := source.Exec(ctx, `CREATE TABLE IF NOT EXISTS `+qualifiedName("bucardo", stage)+
+		` ("txntime" bigint NOT NULL, "target" text NOT NULL, "started" timestamptz NOT NULL DEFAULT now(), PRIMARY KEY ("txntime", "target"))`); err != nil {
+		return fmt.Errorf("create stage table %s: %w", stage, err)
 	}
 
 	functionName := deltaFunctionName(relation)
@@ -72,7 +77,7 @@ FOR EACH ROW EXECUTE FUNCTION ` + qualifiedName("bucardo", functionName) + `()`
 	if _, err := source.Exec(ctx, triggerSQL); err != nil {
 		return fmt.Errorf("create delta trigger on %s.%s: %w", relation.Schema, relation.Name, err)
 	}
-	logger.Debug("replication metadata ready", "schema", relation.Schema, "table", relation.Name, "delta_table", delta, "track_table", track)
+	logger.Debug("replication metadata ready", "schema", relation.Schema, "table", relation.Name, "delta_table", delta, "stage_table", stage, "track_table", track)
 	return nil
 }
 
@@ -84,6 +89,10 @@ func EnsureReplicationObjects(ctx context.Context, source *pgxpool.Pool, relatio
 func deltaFunctionName(relation table.Table) string {
 	hash := sha256.Sum256([]byte(relation.Schema + "." + relation.Name))
 	return "bucardo_g_delta_" + hex.EncodeToString(hash[:])[:16]
+}
+
+func stageName(relation table.Table) string {
+	return "stage_" + relation.Schema + "_" + relation.Name
 }
 
 func qualifiedName(schema, name string) string {

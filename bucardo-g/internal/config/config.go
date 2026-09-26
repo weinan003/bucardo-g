@@ -52,11 +52,12 @@ type Database struct {
 }
 
 type Sync struct {
-	Name         string  `yaml:"name"`
-	Source       string  `yaml:"source"`
-	Target       string  `yaml:"target"`
-	DeleteMethod string  `yaml:"deleteMethod"`
-	Tables       []Table `yaml:"tables"`
+	Name         string   `yaml:"name"`
+	Source       string   `yaml:"source"`
+	Target       string   `yaml:"target"`
+	Targets      []string `yaml:"targets"`
+	DeleteMethod string   `yaml:"deleteMethod"`
+	Tables       []Table  `yaml:"tables"`
 }
 
 type Table struct {
@@ -121,11 +122,28 @@ func (c Config) Validate() error {
 		if !namePattern.MatchString(sync.Name) {
 			return fmt.Errorf("sync name %q is invalid", sync.Name)
 		}
-		if !seen[sync.Source] || !seen[sync.Target] {
+		if !seen[sync.Source] {
 			return fmt.Errorf("sync %q references an unknown database", sync.Name)
 		}
-		if sync.Source == sync.Target {
-			return fmt.Errorf("sync %q source and target must differ", sync.Name)
+		if sync.Target != "" && len(sync.Targets) > 0 {
+			return fmt.Errorf("sync %q must use target or targets, not both", sync.Name)
+		}
+		targets := sync.TargetNames()
+		if len(targets) == 0 {
+			return fmt.Errorf("sync %q requires target or targets", sync.Name)
+		}
+		targetSeen := make(map[string]bool)
+		for _, target := range targets {
+			if targetSeen[target] {
+				return fmt.Errorf("sync %q repeats target %q", sync.Name, target)
+			}
+			targetSeen[target] = true
+			if !seen[target] {
+				return fmt.Errorf("sync %q references unknown target database %q", sync.Name, target)
+			}
+			if sync.Source == target {
+				return fmt.Errorf("sync %q source and target must differ", sync.Name)
+			}
 		}
 		if sync.DeleteMethod == "" {
 			sync.DeleteMethod = "delete"
@@ -147,6 +165,16 @@ func (c Config) Validate() error {
 
 func (s Sync) TargetGroupName() string {
 	return s.Name + "_targets"
+}
+
+func (s Sync) TargetNames() []string {
+	if len(s.Targets) > 0 {
+		return append([]string(nil), s.Targets...)
+	}
+	if s.Target == "" {
+		return nil
+	}
+	return []string{s.Target}
 }
 
 func (s Sync) DomainTables(databaseName string) []table.Table {

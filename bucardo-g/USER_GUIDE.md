@@ -199,3 +199,41 @@ JSON、级别为 `info`：
 支持的级别为 `debug`、`info`、`warn`、`error`；支持的格式为 `json` 和 `text`。
 日志会记录命令生命周期、schema/apply、Sync 锁、每张表的 delta 数量、DML 统计和
 失败原因。日志不会记录 DSN、密码或业务行内容。
+
+写入按日期滚动的文件：
+
+```bash
+./bucardo-g run bucardo.yaml --sync example_sync \
+  --log-file /var/log/bucardo-g/bucardo-g.log \
+  --log-retention-days 14
+```
+
+实际文件名会是：
+
+```text
+/var/log/bucardo-g/bucardo-g-2026-09-26.log
+```
+
+程序第一次写日志和跨日期后的第一次写日志时切换文件。默认文件权限为 owner
+读写、group 只读（`0640`），目录权限为 owner 读写执行、group 读执行（`0750`）。
+`--log-retention-days 0` 表示不自动清理旧日志。文件无法创建或写入时命令直接失败，
+不会静默退回 stderr。
+
+## 11. 手工 kick 和 serve
+
+发送一个 Sync 的 PostgreSQL 通知：
+
+```bash
+./bucardo-g kick bucardo.yaml --sync example_sync
+```
+
+启动常驻监听器：
+
+```bash
+./bucardo-g serve bucardo.yaml
+```
+
+`serve` 监听控制库的 `bucardo` channel，接收 `kick_sync_<sync>` payload 后执行对应
+Sync。使用 `Ctrl-C` 或 SIGINT 停止监听器；日志会记录通知和执行失败。当前服务按配置
+文件中的 Sync 名称接受 kick，完整服务管理器、自动重连和 Windows Service 托管仍在后续
+阶段完善。

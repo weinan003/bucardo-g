@@ -215,7 +215,8 @@ go run ./cmd/bucardo-g run bucardo.yaml --sync "<sync 名称>"
 - 每次命令执行一个 sync，目标组取优先级最高的一个 active target；
 - 单次执行有 Sync 级互斥；尚未实现常驻 Controller 的租约和恢复管理；
 - 只处理带主键的普通表；
-- 暂不包含 LISTEN/NOTIFY 自动调度、多源冲突、TRUNCATE、sequence、VAC 和 custom code；
+- 暂不包含完整服务托管、多源冲突、TRUNCATE、sequence 和 custom code；当前已支持
+   LISTEN/NOTIFY kick、stage/VAC 的 MVP 路径；
 - 依赖源端已经由 Bucardo schema 安装并维护 delta/track 表及触发器。
 
 advisory lock 的互斥和释放已通过 PostgreSQL 集成测试验证；测试库通过
@@ -536,6 +537,11 @@ fixture；包内单测只覆盖局部规则，跨包行为必须进入这里。�
    的 delta trigger 行为。
 6. `TestRegression006CLIAndSyncrunStatuses`：验证 CLI apply/run 及 empty、good、bad
    的 syncrun 持久化状态。
+7. `TestRegression007MultiTargetConfirmation`：验证部分 target 成功时保留 delta，
+   全部 target 确认后清理。
+8. `TestRegression008StageRecoveryAndVacuum`：验证过期 stage 回收和已确认 delta
+   清理。
+9. `TestRegression009KickNotification`：验证 PostgreSQL LISTEN/NOTIFY 手工 kick。
 
 运行回归套件：
 
@@ -545,7 +551,7 @@ BUCARDO_TEST_TARGET_DSN='postgres://...:25432/postgres?sslmode=disable' \
 go test ./regress -count=1 -v
 ```
 
-后续用例按 `007` 起连续编号，优先加入多目标确认。每个用例必须
+后续用例按 `010` 起连续编号，优先加入 serve 取消和重连。每个用例必须
 断言持久化状态、DML 计数和失败结果，不能依赖
 日志文本、PID 或绝对时间戳。
 
